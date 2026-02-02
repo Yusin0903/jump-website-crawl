@@ -1,29 +1,23 @@
-# Use an official Python runtime as a parent image
+# 1. 使用 Python 3.12 輕量版
 FROM python:3.12-slim
 
-# Install uv
+# 2. 安裝 uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# Set the working directory in the container
+# 3. 進入工作目錄
 WORKDIR /app
 
-# Enable bytecode compilation
-ENV UV_COMPILE_BYTECODE=1
+# 4. 只複製依賴相關檔案（利用 Docker 快取機制）
+COPY pyproject.toml uv.lock ./
 
-# Copy from the cache instead of linking since it's a container
-ENV UV_LINK_MODE=copy
+# 5. 直接將依賴安裝到系統中，不建立虛擬環境 (更快，容器內不需要 venv)
+RUN uv pip install --system --no-cache -r pyproject.toml
 
-# Install the project's dependencies using the lockfile and settings
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=uv.lock,target=uv.lock \
-    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --frozen --no-install-project --no-dev
-
-# Copy the rest of the application code
+# 6. 複製程式碼（把程式碼放在後面，這樣改程式碼時不用重新安裝套件）
 COPY . .
 
-# Environment variable for unbuffered output
+# 7. 環境變數：強制輸出 Log，方便你在 Zeabur 看到即時訊息
 ENV PYTHONUNBUFFERED=1
 
-# Command to run the bot using 'uv run' to ensure the correct environment
-CMD ["uv", "run", "bot.py"]
+# 8. 直接執行程式（不再需要透過 uv run，減少啟動開銷）
+CMD ["python", "bot.py"]
