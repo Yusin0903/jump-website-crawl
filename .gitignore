@@ -1,0 +1,9 @@
+# 執行以下指令建立 .gitignore
+cat <<EOF > .gitignore
+.env
+.venv/
+__pycache__/
+*.pyc
+.python-version
+.DS_Store
+EOF
