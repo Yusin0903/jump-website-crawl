@@ -99,7 +99,7 @@ async def send_long_message(interaction, title, content_list):
 async def list_all(interaction: discord.Interaction):
     """顯示所有商品狀態"""
     await interaction.response.defer()
-    products = fetch_products()
+    products = await asyncio.to_thread(fetch_products)
     if not products:
         await interaction.followup.send("無法獲取商品資料。")
         return
@@ -127,7 +127,7 @@ async def list_all(interaction: discord.Interaction):
 async def series_stock(interaction: discord.Interaction, name: str):
     """顯示特定作品的所有商品（包含預約/售罄）"""
     await interaction.response.defer()
-    products = fetch_products()
+    products = await asyncio.to_thread(fetch_products)
     
     found_items = []
     for p in products:
@@ -153,18 +153,20 @@ async def series_autocomplete(interaction: discord.Interaction, current: str):
 
 @bot.tree.command(name="monitor", description="在此頻道開啟自動補貨提醒")
 async def start_monitor(interaction: discord.Interaction):
-    """Start monitoring in this channel"""
+    """在此頻道開啟自動補貨提醒"""
+    await interaction.response.defer()
     monitoring_channels.add(interaction.channel_id)
-    await interaction.response.send_message(f"✅ 已在此頻道開啟自動補貨提醒！當商品狀態變更時會通知大家。")
+    await interaction.followup.send(f"✅ 已在此頻道開啟自動補貨提醒！當商品狀態變更時會通知大家。")
 
 @bot.tree.command(name="stop", description="在此頻道停止自動補貨提醒")
 async def stop_monitor(interaction: discord.Interaction):
-    """Stop monitoring in this channel"""
+    """在此頻道停止自動補貨提醒"""
+    await interaction.response.defer()
     if interaction.channel_id in monitoring_channels:
         monitoring_channels.remove(interaction.channel_id)
-        await interaction.response.send_message("❌ 已停止此頻道的自動補貨提醒。")
+        await interaction.followup.send("❌ 已停止此頻道的自動補貨提醒。")
     else:
-        await interaction.response.send_message("此頻道本來就沒有開啟提醒喔。")
+        await interaction.followup.send("此頻道本來就沒有開啟提醒喔。")
 
 @bot.event
 async def on_command_error(ctx, error):
@@ -178,13 +180,12 @@ async def monitor_task():
         return
 
     try:
-        # 獲取最新產品並更新快取 (確保新系列會出現在選單中)
-        products = fetch_products()
+        # 獲取最新產品並更新快取
+        products = await asyncio.to_thread(fetch_products)
         update_series_cache(products)
         
-        # 這裡是原本的 monitor_check 邏輯
-        # 為了效能，我們可以稍微優化 monitor_check 不要重複 fetch，但維持現狀較安全
-        changes, new_status = monitor_check(current_stock_status)
+        # 使用 to_thread 執行監測邏輯，避免阻塞
+        changes, new_status = await asyncio.to_thread(monitor_check, current_stock_status)
         current_stock_status = new_status
         
         if changes:
