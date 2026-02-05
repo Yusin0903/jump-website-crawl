@@ -47,11 +47,12 @@ def fetch_products():
                 filtered_products = [p for p in products if is_target_product(p['title'])]
                 all_products.extend(filtered_products)
                 
+                # 如果單頁商品少於 limit (250)，代表是最後一頁
                 if len(products) < 250:
                     break
                 
                 page += 1
-                time.sleep(0.5)
+                time.sleep(0.5) # 禮貌性延遲
             else:
                 print(f"無法連線 (HTTP {response.status_code})")
                 break
@@ -64,7 +65,7 @@ def fetch_products():
 def initial_scan():
     """第一階段：列出所有商品現狀"""
     global last_stock_status
-    print("=== [第一階段] 正在初始化：掃描所有「再入荷」商品現狀 ===\n")
+    print("=== [第一階段] 正在初始化：建立商品資料庫 ===\n")
     
     products = fetch_products()
     if not products:
@@ -74,14 +75,12 @@ def initial_scan():
     for p in products:
         p_id = p['id']
         p_title = p['title']
-        # 只要有一個款式有貨，available 就會是 True
         is_available = any(v['available'] for v in p['variants'])
         
-        # 儲存狀態供後續對比
+        # 儲存狀態
         last_stock_status[p_id] = is_available
         
-        # 顯示狀態
-        status_tag = "【可購買】" if is_available else "[売り切れ]"
+        status_tag = "【可購買】" if is_available else "[無庫存]"
         print(f"{status_tag} {p_title}")
 
     print("\n" + "="*50)
@@ -98,28 +97,44 @@ def monitor_check(current_stock_status):
         p_id = p['id']
         p_title = p['title']
         is_available = any(v['available'] for v in p['variants'])
+        product_url = f"https://jumpshop-online.com/products/{p['handle']}"
         
-        # 檢查是否存在於舊紀錄中 (避免 API 突然新增商品)
+        # 判斷邏輯
         if p_id in current_stock_status:
+            # --- 舊商品邏輯 (監控庫存變化) ---
             old_status = current_stock_status[p_id]
             
-            # 關鍵邏輯：原本售罄 (False) 變成 有貨 (True)
+            # 狀態：沒貨 -> 有貨 (補貨通知)
             if not old_status and is_available:
                 changes.append({
                     "type": "restock",
                     "title": p_title,
-                    "handle": p['handle'],
-                    "url": f"https://jumpshop-online.com/products/{p['handle']}"
+                    "url": product_url
                 })
             
-            # 如果想知道什麼時候賣完
+            # 狀態：有貨 -> 沒貨 (售罄通知)
             elif old_status and not is_available:
                 changes.append({
                     "type": "soldout",
                     "title": p_title
                 })
+        else:
+            # --- 新商品邏輯 (監控頁面上架) ---
+            # 只要 ID 是新的，無論有沒有貨，都通知
+            if is_available:
+                changes.append({
+                    "type": "new_arrival_buyable",
+                    "title": p_title,
+                    "url": product_url
+                })
+            else:
+                changes.append({
+                    "type": "new_arrival_coming_soon",
+                    "title": p_title,
+                    "url": product_url
+                })
 
-        # 更新狀態
+        # 更新狀態字典
         new_stock_status[p_id] = is_available
     
     return changes, new_stock_status
@@ -132,15 +147,33 @@ if __name__ == "__main__":
     while True:
         try:
             changes, last_stock_status = monitor_check(last_stock_status)
+            
             for change in changes:
+                # 1. 舊品補貨
                 if change['type'] == 'restock':
-                    print(f"🔔 補貨通知！！ >>> {change['title']}")
+                    print(f"🔔 補貨通知！！ (庫存恢復) >>> {change['title']}")
                     print(f"🔗 連結: {change['url']}\n")
+                
+                # 2. 新品直接上架開賣
+                elif change['type'] == 'new_arrival_buyable':
+                    print(f"✨ 新品上架！！ (現貨可買) >>> {change['title']}")
+                    print(f"🔗 連結: {change['url']}\n")
+
+                # 3. 新品頁面出現 (但尚未開賣)
+                elif change['type'] == 'new_arrival_coming_soon':
+                    print(f"👀 發現新品頁面！！ (尚未開賣) >>> {change['title']}")
+                    print(f"🔗 連結: {change['url']}\n")
+                    print(f"   (備註: 此商品目前顯示無庫存，可能是預告頁面，請密切關注補貨通知)\n")
+
+                # 4. 售罄
                 elif change['type'] == 'soldout':
                     print(f"⚪ 剛售罄: {change['title']}")
             
-            # 每一分鐘檢查一次，避免頻繁請求被封鎖 IP
+            # 每一分鐘檢查一次
             time.sleep(60) 
         except KeyboardInterrupt:
             print("\n監控已停止。")
             break
+        except Exception as e:
+            print(f"發生未預期錯誤: {e}")
+            time.sleep(60)
