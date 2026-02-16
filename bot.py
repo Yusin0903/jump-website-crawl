@@ -203,6 +203,22 @@ async def monitor_task():
                             await channel.send(embed=embed)
                         elif change['type'] == 'soldout':
                             await channel.send(f"⚪ 剛售罄: **{change['title']}**")
+                        elif change['type'] == 'new_arrival_buyable':
+                            embed = discord.Embed(
+                                title="✨ 新品上架！(現貨可買)",
+                                description=f"**{change['title']}** 上架並可以購買了！",
+                                url=change['url'],
+                                color=0x00ffff # Cyan
+                            )
+                            await channel.send(embed=embed)
+                        elif change['type'] == 'new_arrival_coming_soon':
+                            embed = discord.Embed(
+                                title="👀 發現新品頁面！(尚未開賣)",
+                                description=f"**{change['title']}** 頁面已建立，但目前無庫存。\n可能即將開賣，請密切關注！",
+                                url=change['url'],
+                                color=0x808080 # Grey
+                            )
+                            await channel.send(embed=embed)
     except Exception as e:
         print(f"Error in monitor task: {e}")
 
