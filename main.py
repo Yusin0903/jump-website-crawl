@@ -170,7 +170,7 @@ if __name__ == "__main__":
                     print(f"⚪ 剛售罄: {change['title']}")
             
             # 每一分鐘檢查一次
-            time.sleep(60) 
+            time.sleep(10) 
         except KeyboardInterrupt:
             print("\n監控已停止。")
             break
