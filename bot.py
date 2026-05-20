@@ -1,9 +1,9 @@
 import discord
 from discord.ext import commands, tasks
 import os
-import asyncio
+import aiohttp
 from dotenv import load_dotenv
-from main import fetch_products, monitor_check, initial_scan, last_stock_status
+from main import fetch_products, monitor_check, HEADERS
 
 # Load environment variables
 load_dotenv()
@@ -20,6 +20,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 monitoring_channels = set()
 current_stock_status = {}
 cached_series = []
+http_session: aiohttp.ClientSession | None = None
 
 def update_series_cache(products):
     """更新作品名稱快取"""
@@ -35,16 +36,28 @@ async def on_ready():
     print(f'Logged in as {bot.user.name} (ID: {bot.user.id})')
     invite_link = discord.utils.oauth_url(bot.user.id, permissions=discord.Permissions(administrator=True), scopes=("bot", "applications.commands"))
     print(f'Invite link: {invite_link}')
+
+    global http_session
+    if http_session is None or http_session.closed:
+        http_session = aiohttp.ClientSession(
+            headers=HEADERS,
+            timeout=aiohttp.ClientTimeout(total=15),
+        )
+
     # Initialize stock status on startup
     print("Initializing stock status...")
     global current_stock_status
-    products = fetch_products()
+    try:
+        products = await fetch_products(session=http_session)
+    except Exception as e:
+        print(f"Initial fetch failed: {e}")
+        products = []
     update_series_cache(products)
     for p in products:
         is_available = any(v['available'] for v in p['variants'])
         current_stock_status[p['id']] = is_available
     print(f"Initialized with {len(current_stock_status)} products.")
-    
+
     # Sync slash commands
     try:
         synced = await bot.tree.sync()
@@ -54,6 +67,13 @@ async def on_ready():
 
     if not monitor_task.is_running():
         monitor_task.start()
+
+
+@bot.event
+async def on_close():
+    global http_session
+    if http_session and not http_session.closed:
+        await http_session.close()
 
 @bot.command()
 @commands.is_owner()
@@ -99,7 +119,7 @@ async def send_long_message(interaction, title, content_list):
 async def list_all(interaction: discord.Interaction):
     """顯示所有商品狀態"""
     await interaction.response.defer()
-    products = await asyncio.to_thread(fetch_products)
+    products = await fetch_products(session=http_session)
     if not products:
         await interaction.followup.send("無法獲取商品資料。")
         return
@@ -127,7 +147,7 @@ async def list_all(interaction: discord.Interaction):
 async def series_stock(interaction: discord.Interaction, name: str):
     """顯示特定作品的所有商品（包含預約/售罄）"""
     await interaction.response.defer()
-    products = await asyncio.to_thread(fetch_products)
+    products = await fetch_products(session=http_session)
     
     found_items = []
     for p in products:
@@ -173,19 +193,20 @@ async def on_command_error(ctx, error):
     print(f"Error executing command {ctx.command}: {error}")
     await ctx.send(f"An error occurred: {error}")
 
-@tasks.loop(seconds=60)
+@tasks.loop(seconds=20)
 async def monitor_task():
     global current_stock_status
     if not monitoring_channels:
         return
 
     try:
-        # 獲取最新產品並更新快取
-        products = await asyncio.to_thread(fetch_products)
+        # 獲取最新產品並更新快取 (一次請求,共用給 monitor_check)
+        products = await fetch_products(session=http_session)
+        if not products:
+            return
         update_series_cache(products)
-        
-        # 使用 to_thread 執行監測邏輯，避免阻塞
-        changes, new_status = await asyncio.to_thread(monitor_check, current_stock_status)
+
+        changes, new_status = await monitor_check(current_stock_status, products=products)
         current_stock_status = new_status
         
         if changes:
