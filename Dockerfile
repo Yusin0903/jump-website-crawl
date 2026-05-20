@@ -19,5 +19,8 @@ COPY . .
 # 7. 環境變數：強制輸出 Log，方便你在 Zeabur 看到即時訊息
 ENV PYTHONUNBUFFERED=1
 
-# 8. 直接執行程式（不再需要透過 uv run，減少啟動開銷）
+# 8. 暴露 health check port (Zeabur 等 PaaS 需要)
+EXPOSE 8080
+
+# 9. 直接執行程式（不再需要透過 uv run，減少啟動開銷）
 CMD ["python", "bot.py"]

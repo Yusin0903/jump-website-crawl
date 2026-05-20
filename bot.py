@@ -2,12 +2,14 @@ import discord
 from discord.ext import commands, tasks
 import os
 import aiohttp
+from aiohttp import web
 from dotenv import load_dotenv
 from main import fetch_products, monitor_check, HEADERS
 
 # Load environment variables
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
+PORT = int(os.getenv('PORT', '8080'))
 
 # Configure intents
 intents = discord.Intents.default()
@@ -21,6 +23,7 @@ monitoring_channels = set()
 current_stock_status = {}
 cached_series = []
 http_session: aiohttp.ClientSession | None = None
+health_server_started = False
 
 def update_series_cache(products):
     """更新作品名稱快取"""
@@ -67,6 +70,28 @@ async def on_ready():
 
     if not monitor_task.is_running():
         monitor_task.start()
+
+    # Start health check HTTP server for Zeabur (and other PaaS) probes
+    await start_health_server()
+
+
+async def health_handler(request):
+    return web.Response(text="ok")
+
+
+async def start_health_server():
+    global health_server_started
+    if health_server_started:
+        return
+    app = web.Application()
+    app.router.add_get('/', health_handler)
+    app.router.add_get('/health', health_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    health_server_started = True
+    print(f"Health check server listening on 0.0.0.0:{PORT}")
 
 
 @bot.event
