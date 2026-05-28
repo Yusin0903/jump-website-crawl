@@ -67,6 +67,11 @@ def load_config():
 def save_config():
     config["monitored_series"] = sorted(list(monitored_series))
     config["monitoring_channels"] = list(monitoring_channels)
+    
+    dir_name = os.path.dirname(CONFIG_FILE)
+    if dir_name:
+        os.makedirs(dir_name, exist_ok=True)
+        
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
 
