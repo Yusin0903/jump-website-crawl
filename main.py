@@ -4,8 +4,8 @@ import aiohttp
 # JUMP SHOP 所有商品的 JSON API
 URL = "https://jumpshop-online.com/collections/all/products.json?limit=250"
 
-# 指定抓取的作品清單
-TARGET_SERIES = [
+# 單獨執行 main.py 時預設抓取的作品清單
+STANDALONE_TARGET_SERIES = [
     "HUNTER×HUNTER",
     "SAKAMOTO DAYS",
     "チェンソーマン",
@@ -22,9 +22,10 @@ HEADERS = {
 last_stock_status = {}
 
 
-def is_target_product(title):
+def is_target_product(title, target_list=None):
     """檢查商品標題是否包含指定的作品名稱"""
-    for series in TARGET_SERIES:
+    targets = target_list if target_list is not None else STANDALONE_TARGET_SERIES
+    for series in targets:
         if series in title:
             return True
     return False
@@ -59,8 +60,8 @@ async def fetch_products(session: aiohttp.ClientSession | None = None):
             if not products:
                 break
 
-            filtered_products = [p for p in products if is_target_product(p['title'])]
-            all_products.extend(filtered_products)
+            # 改為回傳所有商品，不過濾
+            all_products.extend(products)
 
             # 如果單頁商品少於 limit (250)，代表是最後一頁
             if len(products) < 250:
@@ -144,8 +145,10 @@ async def initial_scan():
         is_available = any(v['available'] for v in p['variants'])
         last_stock_status[p_id] = is_available
 
-        status_tag = "【可購買】" if is_available else "[無庫存]"
-        print(f"{status_tag} {p_title}")
+        # 為了避免洗頻，單獨執行時只列印目標作品
+        if is_target_product(p_title):
+            status_tag = "【可購買】" if is_available else "[無庫存]"
+            print(f"{status_tag} {p_title}")
 
     print("\n" + "=" * 50)
     print(f"初始化完成，共監控 {len(products)} 項商品。")
@@ -161,6 +164,10 @@ async def _standalone_loop():
                 changes, last_stock_status = await monitor_check(last_stock_status, session=session)
 
                 for change in changes:
+                    # 單獨執行時，過濾出目標作品
+                    if not is_target_product(change['title']):
+                        continue
+
                     if change['type'] == 'restock':
                         print(f"🔔 補貨通知！！ (庫存恢復) >>> {change['title']}")
                         print(f"🔗 連結: {change['url']}\n")

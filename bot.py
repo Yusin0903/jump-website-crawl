@@ -25,6 +25,53 @@ cached_series = []
 http_session: aiohttp.ClientSession | None = None
 health_server_started = False
 
+import json
+
+# 讓路徑支援環境變數設定，方便 Zeabur 掛載持久化硬碟
+DATA_DIR = os.getenv('DATA_DIR', '.')
+CONFIG_FILE = os.path.join(DATA_DIR, 'bot_config.json')
+
+config = {
+    "monitored_series": [
+        "HUNTER×HUNTER",
+        "SAKAMOTO DAYS",
+        "チェンソーマン",
+        "僕のヒーローアカデミア",
+        "呪術廻戦",
+        "鬼滅の刃"
+    ],
+    "notify_soldout": True,
+    "monitoring_channels": []
+}
+monitored_series = set(config["monitored_series"])
+
+def load_config():
+    global config, monitored_series, monitoring_channels
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            config.update(data)
+            monitored_series = set(config.get("monitored_series", []))
+            monitoring_channels = set(config.get("monitoring_channels", []))
+    except (FileNotFoundError, json.JSONDecodeError):
+        # 找不到的話試著相容讀取舊的檔案
+        try:
+            with open('monitored_series.json', 'r', encoding='utf-8') as f:
+                old_data = json.load(f)
+                config["monitored_series"] = old_data
+                monitored_series = set(old_data)
+        except:
+            pass
+        save_config()
+
+def save_config():
+    config["monitored_series"] = sorted(list(monitored_series))
+    config["monitoring_channels"] = list(monitoring_channels)
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+
+load_config()
+
 def update_series_cache(products):
     """更新作品名稱快取"""
     global cached_series
@@ -196,11 +243,88 @@ async def series_autocomplete(interaction: discord.Interaction, current: str):
         for s in cached_series if current.lower() in s.lower()
     ][:25]
 
+@bot.tree.command(name="add_series", description="新增要自動補貨提醒的作品")
+@discord.app_commands.describe(name="作品名稱")
+@discord.app_commands.autocomplete(name=series_autocomplete)
+async def add_series_cmd(interaction: discord.Interaction, name: str):
+    await interaction.response.defer()
+    monitored_series.add(name)
+    save_config()
+    await interaction.followup.send(f"✅ 已新增追蹤作品：**{name}**")
+
+async def monitored_autocomplete(interaction: discord.Interaction, current: str):
+    return [
+        discord.app_commands.Choice(name=s, value=s)
+        for s in sorted(monitored_series) if current.lower() in s.lower()
+    ][:25]
+
+@bot.tree.command(name="remove_series", description="移除不再需要自動補貨提醒的作品")
+@discord.app_commands.describe(name="作品名稱")
+@discord.app_commands.autocomplete(name=monitored_autocomplete)
+async def remove_series_cmd(interaction: discord.Interaction, name: str):
+    await interaction.response.defer()
+    if name in monitored_series:
+        monitored_series.remove(name)
+        save_config()
+        await interaction.followup.send(f"❌ 已取消追蹤作品：**{name}**")
+    else:
+        await interaction.followup.send(f"⚠️ 目前沒有追蹤：**{name}**")
+
+@bot.tree.command(name="list_series", description="顯示目前自動補貨提醒追蹤中的作品名單")
+async def list_series_cmd(interaction: discord.Interaction):
+    await interaction.response.defer()
+    if not monitored_series:
+        await interaction.followup.send("目前沒有追蹤任何作品。")
+        return
+    series_list = "\n".join([f"- {s}" for s in sorted(monitored_series)])
+    await interaction.followup.send(f"📋 **目前追蹤的作品：**\n{series_list}")
+
+@bot.tree.command(name="toggle_soldout", description="開啟/關閉售罄通知")
+@discord.app_commands.describe(enable="是否開啟售罄通知？")
+async def toggle_soldout_cmd(interaction: discord.Interaction, enable: bool):
+    await interaction.response.defer()
+    config["notify_soldout"] = enable
+    save_config()
+    status = "開啟" if enable else "關閉"
+    await interaction.followup.send(f"✅ 已**{status}**售罄通知。")
+
+@bot.tree.command(name="help", description="顯示機器人功能與使用步驟教學")
+async def help_cmd(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🤖 Jump Shop 庫存監控機器人 - 使用教學",
+        description="這是一個會自動監控 Jump Shop 商品庫存的機器人，以下是使用方式：",
+        color=discord.Color.blue()
+    )
+    
+    embed.add_field(name="📍 1. 開啟/關閉頻道通知", 
+                    value="使用 `/monitor` 可以在當前頻道開啟通知。\n使用 `/stop` 可以停止此頻道的通知。", 
+                    inline=False)
+    
+    embed.add_field(name="📚 2. 管理追蹤的作品 (支援自動完成)", 
+                    value="使用 `/add_series` 可以新增你想追蹤的作品。\n"
+                          "使用 `/remove_series` 可以移除不想追蹤的作品。\n"
+                          "使用 `/list_series` 檢視目前所有追蹤中的清單。", 
+                    inline=False)
+    
+    embed.add_field(name="⚙️ 3. 其他設定", 
+                    value="使用 `/toggle_soldout` 設定是否要接收「售罄(無庫存)」的推播通知。", 
+                    inline=False)
+
+    embed.add_field(name="🔍 4. 查詢商品狀態", 
+                    value="使用 `/series` 查詢某個作品目前的全部商品與庫存狀態。\n"
+                          "使用 `/all` 顯示所有抓取到的商品庫存總表（訊息較長）。", 
+                    inline=False)
+    
+    embed.set_footer(text="提示：使用 / 指令時，Discord 會跳出選項，直接點選即可！")
+    
+    await interaction.response.send_message(embed=embed)
+
 @bot.tree.command(name="monitor", description="在此頻道開啟自動補貨提醒")
 async def start_monitor(interaction: discord.Interaction):
     """在此頻道開啟自動補貨提醒"""
     await interaction.response.defer()
     monitoring_channels.add(interaction.channel_id)
+    save_config()
     await interaction.followup.send(f"✅ 已在此頻道開啟自動補貨提醒！當商品狀態變更時會通知大家。")
 
 @bot.tree.command(name="stop", description="在此頻道停止自動補貨提醒")
@@ -209,6 +333,7 @@ async def stop_monitor(interaction: discord.Interaction):
     await interaction.response.defer()
     if interaction.channel_id in monitoring_channels:
         monitoring_channels.remove(interaction.channel_id)
+        save_config()
         await interaction.followup.send("❌ 已停止此頻道的自動補貨提醒。")
     else:
         await interaction.followup.send("此頻道本來就沒有開啟提醒喔。")
@@ -234,11 +359,17 @@ async def monitor_task():
         changes, new_status = await monitor_check(current_stock_status, products=products)
         current_stock_status = new_status
         
-        if changes:
+        # 過濾出我們感興趣的變更
+        filtered_changes = []
+        for change in changes:
+            if any(s in change['title'] for s in monitored_series):
+                filtered_changes.append(change)
+
+        if filtered_changes:
             for channel_id in monitoring_channels:
                 channel = bot.get_channel(channel_id)
                 if channel:
-                    for change in changes:
+                    for change in filtered_changes:
                         if change['type'] == 'restock':
                             embed = discord.Embed(
                                 title="🔔 補貨通知！",
@@ -248,7 +379,8 @@ async def monitor_task():
                             )
                             await channel.send(embed=embed)
                         elif change['type'] == 'soldout':
-                            await channel.send(f"⚪ 剛售罄: **{change['title']}**")
+                            if config.get("notify_soldout", True):
+                                await channel.send(f"⚪ 剛售罄: **{change['title']}**")
                         elif change['type'] == 'new_arrival_buyable':
                             embed = discord.Embed(
                                 title="✨ 新品上架！(現貨可買)",
