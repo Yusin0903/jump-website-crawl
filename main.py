@@ -1,16 +1,30 @@
 import asyncio
 import random
+import time
 import aiohttp
 
 # JUMP SHOP 所有商品的 JSON API
 URL = "https://jumpshop-online.com/collections/all/products.json?limit=250"
 
 # --- 速率限制 (HTTP 429) 退避設定 ---
-# Shopify 對未授權的 products.json 端點有速率限制，過於頻繁請求會回傳 429。
-# 收到 429 時必須退避 (back off)，否則持續以固定間隔重試只會一直被封鎖。
-MAX_RETRIES = 4          # 單頁遇到 429 時的最大重試次數
+# Shopify / Cloudflare 對未授權的 products.json 端點有速率限制與機器人偵測，
+# 過於頻繁請求會回傳 429。收到 429 時必須退避 (back off)，否則持續以固定間隔
+# 重試只會一直觸發限制、讓限流時間窗永遠無法重置。
+MAX_RETRIES = 2          # 單頁遇到 429 時的最大「短期」重試次數
 RETRY_BACKOFF_BASE = 5   # 指數退避基數 (秒)
 RETRY_BACKOFF_MAX = 120  # 單次退避上限 (秒)
+
+# --- 斷路器 (circuit breaker) ---
+# 當短期重試仍持續被限流，就讓整個機器人「停止發送請求」一段較長的時間，
+# 讓 Shopify 端的限流時間窗有機會重置；連續失敗越多次，冷卻時間越長。
+COOLDOWN_BASE = 120      # 進入冷卻的基礎秒數
+COOLDOWN_MAX = 1800      # 冷卻時間上限 (30 分鐘)
+_cooldown_until = 0.0    # monotonic 時間戳；在此之前不發送任何請求
+_consecutive_failures = 0
+
+
+class RateLimitedError(Exception):
+    """短期重試耗盡仍持續被限流 (429) 時拋出，用來觸發斷路器冷卻。"""
 
 # 單獨執行 main.py 時預設抓取的作品清單
 STANDALONE_TARGET_SERIES = [
@@ -23,7 +37,12 @@ STANDALONE_TARGET_SERIES = [
 ]
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    # 使用較新的瀏覽器標頭，降低被 Cloudflare 機器人偵測攔截的機率
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+    "Referer": "https://jumpshop-online.com/",
+    "Connection": "keep-alive",
 }
 
 # 用來記錄上次庫存狀態的字典 {商品ID: 是否可購買}
@@ -52,9 +71,10 @@ def _retry_after_seconds(response, attempt):
 
 
 async def _fetch_page(session: aiohttp.ClientSession, page: int):
-    """請求單一頁面，內建 429 指數退避重試。
+    """請求單一頁面，內建 429 短期指數退避重試。
 
-    回傳商品 list；若連線失敗或重試耗盡則回傳 None。
+    回傳商品 list；若連線失敗則回傳 None；若短期重試後仍持續被限流則拋出
+    RateLimitedError 以觸發斷路器冷卻。
     """
     paginated_url = f"{URL}&page={page}"
     for attempt in range(MAX_RETRIES + 1):
@@ -62,8 +82,7 @@ async def _fetch_page(session: aiohttp.ClientSession, page: int):
             async with session.get(paginated_url) as response:
                 if response.status == 429:
                     if attempt >= MAX_RETRIES:
-                        print(f"無法連線 (HTTP 429)：已達最大重試次數 ({MAX_RETRIES})，本輪放棄")
-                        return None
+                        raise RateLimitedError(page)
                     wait = _retry_after_seconds(response, attempt)
                     print(f"被限流 (HTTP 429)，{wait:.0f} 秒後重試 ({attempt + 1}/{MAX_RETRIES})")
                     await asyncio.sleep(wait)
@@ -83,7 +102,19 @@ async def _fetch_page(session: aiohttp.ClientSession, page: int):
 
 
 async def fetch_products(session: aiohttp.ClientSession | None = None):
-    """向 Shopify 請求所有商品資料 (包含分頁)"""
+    """向 Shopify 請求所有商品資料 (包含分頁)。
+
+    內建斷路器：若先前連續被限流而進入冷卻期，會直接跳過本輪請求回傳空清單，
+    避免持續觸發限流。
+    """
+    global _cooldown_until, _consecutive_failures
+
+    now = time.monotonic()
+    if now < _cooldown_until:
+        remaining = _cooldown_until - now
+        print(f"速率限制冷卻中 (還剩 {remaining:.0f} 秒)，本輪跳過請求")
+        return []
+
     own_session = session is None
     if own_session:
         session = aiohttp.ClientSession(headers=HEADERS, timeout=aiohttp.ClientTimeout(total=15))
@@ -93,8 +124,17 @@ async def fetch_products(session: aiohttp.ClientSession | None = None):
 
     try:
         while True:
-            products = await _fetch_page(session, page)
-            if not products:  # None (連線失敗/被限流) 或空頁皆視為結束
+            try:
+                products = await _fetch_page(session, page)
+            except RateLimitedError:
+                # 短期重試仍被限流 -> 觸發斷路器，冷卻時間隨連續失敗次數指數成長
+                _consecutive_failures += 1
+                cooldown = min(COOLDOWN_BASE * (2 ** (_consecutive_failures - 1)), COOLDOWN_MAX)
+                _cooldown_until = time.monotonic() + cooldown
+                print(f"持續被限流 (連續 {_consecutive_failures} 次)，暫停請求 {cooldown:.0f} 秒後再試")
+                return all_products
+
+            if not products:  # None (連線失敗) 或空頁皆視為結束
                 break
 
             # 改為回傳所有商品，不過濾
@@ -106,6 +146,10 @@ async def fetch_products(session: aiohttp.ClientSession | None = None):
 
             page += 1
             await asyncio.sleep(0.5)  # 禮貌性延遲
+
+        # 成功完成整輪抓取 -> 重置斷路器
+        _consecutive_failures = 0
+        _cooldown_until = 0.0
     finally:
         if own_session:
             await session.close()
