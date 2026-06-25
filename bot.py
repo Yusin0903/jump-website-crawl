@@ -348,7 +348,7 @@ async def on_command_error(ctx, error):
     print(f"Error executing command {ctx.command}: {error}")
     await ctx.send(f"An error occurred: {error}")
 
-@tasks.loop(seconds=20)
+@tasks.loop(seconds=60)
 async def monitor_task():
     global current_stock_status
     if not monitoring_channels:
