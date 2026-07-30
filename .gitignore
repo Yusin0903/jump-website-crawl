@@ -1,9 +1,10 @@
-# 執行以下指令建立 .gitignore
-cat <<EOF > .gitignore
 .env
 .venv/
 __pycache__/
 *.pyc
 .python-version
 .DS_Store
-EOF
+
+# 執行期自動產生的設定檔 (監控頻道、追蹤作品等狀態，不應進版控)
+bot_config.json
+monitored_series.json
