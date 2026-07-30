@@ -20,6 +20,12 @@ REQUEST_INTERVAL = int(os.getenv("REQUEST_INTERVAL", "60"))
 PROXIES = [p.strip() for p in os.getenv("PROXIES", "").split(",") if p.strip()]
 _proxy_index = 0
 
+# 每輪最多嘗試幾個 proxy 就放棄本輪 (避免一次把幾十個死掉的免費 proxy 全試一遍
+# 而卡住十幾分鐘)。輪替是全域的，跨多輪仍會逐步用到清單裡所有 proxy。
+PROXY_MAX_ATTEMPTS = int(os.getenv("PROXY_MAX_ATTEMPTS", "5"))
+# 使用 proxy 時的單次請求逾時 (秒)；免費 proxy 常常是死的，縮短逾時可快速跳過。
+PROXY_TIMEOUT = int(os.getenv("PROXY_TIMEOUT", "8"))
+
 
 def _next_proxy():
     """輪替取得下一個 proxy；未設定時回傳 None (直連)。"""
@@ -112,12 +118,17 @@ async def _fetch_page(session: aiohttp.ClientSession, page: int):
     RateLimitedError 以觸發斷路器冷卻。
     """
     paginated_url = f"{URL}&page={page}"
-    # 有 proxy 池時，至少讓每個出口 IP 都有機會被嘗試一次
-    retries = max(MAX_RETRIES, len(PROXIES)) if PROXIES else MAX_RETRIES
+    # 有 proxy 池時，最多輪試 PROXY_MAX_ATTEMPTS 個出口 IP 就放棄本輪，
+    # 避免一次把幾十個死掉的免費 proxy 全試一遍而卡很久。
+    retries = min(len(PROXIES), PROXY_MAX_ATTEMPTS) if PROXIES else MAX_RETRIES
+    # 使用 proxy 時縮短單次逾時 (讓死掉的 proxy 快速失敗跳過)；直連時沿用 session 預設
+    extra = {}
+    if PROXIES:
+        extra["timeout"] = aiohttp.ClientTimeout(total=PROXY_TIMEOUT)
     for attempt in range(retries + 1):
         proxy = _next_proxy()  # 每次嘗試輪替一個出口 IP (未設定時為 None=直連)
         try:
-            async with session.get(paginated_url, proxy=proxy) as response:
+            async with session.get(paginated_url, proxy=proxy, **extra) as response:
                 if response.status == 429:
                     if attempt >= retries:
                         raise RateLimitedError(page)
