@@ -54,10 +54,21 @@ uv sync
 DISCORD_TOKEN=your_discord_bot_token_here
 # 選填：每次向網站發送請求的間隔秒數 (預設 60)。數字越大越不容易被限流 (HTTP 429)。
 REQUEST_INTERVAL=60
+# 選填：輪替使用的 proxy 清單 (逗號分隔)，每次請求輪流換不同出口 IP。
+PROXIES=http://user:pass@host1:port,http://host2:port
 ```
 
 > 若一直遇到 HTTP 429 (被限流)，把 `REQUEST_INTERVAL` 調大 (例如 120、180) 即可，不用改程式碼。
 > 部署在 Zeabur 時，可在服務的環境變數設定中直接加上 `REQUEST_INTERVAL`。
+
+#### 使用輪替 Proxy 繞過 IP 限流
+
+如果限流是因為**機房 IP 被整段封鎖** (調大 `REQUEST_INTERVAL` 也沒用)，可以設定 `PROXIES` 讓程式輪流從不同出口 IP 發送請求：
+
+- 用逗號分隔多個 proxy，支援 `http://`、`https://`、`socks5://`，也支援帶帳密的 `http://user:pass@host:port`。
+- **每次請求**都會輪替到下一個 proxy；遇到 429 或某個 proxy 連線失敗時，會**自動切換到下一個**再試。
+- 留空 (或不設定) 則維持原本的直連行為。
+- socks5 proxy 需要額外安裝套件：`pip install aiohttp-socks`。
 
 到 [Discord Developer Portal](https://discord.com/developers/applications) 建立 Bot 並取得 Token。
 記得開啟以下 Intents:
