@@ -4,7 +4,8 @@ import os
 import aiohttp
 from aiohttp import web
 from dotenv import load_dotenv
-from main import fetch_products, monitor_check, HEADERS
+import main
+from main import fetch_products, monitor_check, HEADERS, REQUEST_INTERVAL
 
 # Load environment variables
 load_dotenv()
@@ -24,6 +25,7 @@ current_stock_status = {}
 cached_series = []
 http_session: aiohttp.ClientSession | None = None
 health_server_started = False
+rate_limit_notified = False  # 是否已對頻道發出「被限流」通知 (避免重複洗頻)
 
 import json
 
@@ -348,15 +350,42 @@ async def on_command_error(ctx, error):
     print(f"Error executing command {ctx.command}: {error}")
     await ctx.send(f"An error occurred: {error}")
 
-@tasks.loop(seconds=60)
+async def broadcast(message):
+    """對所有監控頻道發送純文字訊息。"""
+    for channel_id in monitoring_channels:
+        channel = bot.get_channel(channel_id)
+        if channel:
+            try:
+                await channel.send(message)
+            except Exception as e:
+                print(f"Failed to notify channel {channel_id}: {e}")
+
+
+@tasks.loop(seconds=REQUEST_INTERVAL)
 async def monitor_task():
-    global current_stock_status
+    global current_stock_status, rate_limit_notified
     if not monitoring_channels:
         return
 
     try:
         # 獲取最新產品並更新快取 (一次請求,共用給 monitor_check)
         products = await fetch_products(session=http_session)
+
+        # --- 限流狀態通知 (只在狀態切換時發一次，避免洗頻) ---
+        if main.is_rate_limited():
+            if not rate_limit_notified:
+                rate_limit_notified = True
+                mins = main.cooldown_remaining() / 60
+                await broadcast(
+                    f"⚠️ 目前被 Jump Shop 網站限流 (HTTP 429)，"
+                    f"暫停監控約 {mins:.0f} 分鐘後自動重試。"
+                )
+            return  # 冷卻中，沒有有效資料可處理
+        elif rate_limit_notified:
+            # 剛從限流中恢復
+            rate_limit_notified = False
+            await broadcast("✅ 已恢復與 Jump Shop 的連線，繼續監控中。")
+
         if not products:
             return
         update_series_cache(products)

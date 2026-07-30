@@ -52,7 +52,12 @@ uv sync
 
 ```env
 DISCORD_TOKEN=your_discord_bot_token_here
+# 選填：每次向網站發送請求的間隔秒數 (預設 60)。數字越大越不容易被限流 (HTTP 429)。
+REQUEST_INTERVAL=60
 ```
+
+> 若一直遇到 HTTP 429 (被限流)，把 `REQUEST_INTERVAL` 調大 (例如 120、180) 即可，不用改程式碼。
+> 部署在 Zeabur 時，可在服務的環境變數設定中直接加上 `REQUEST_INTERVAL`。
 
 到 [Discord Developer Portal](https://discord.com/developers/applications) 建立 Bot 並取得 Token。
 記得開啟以下 Intents:

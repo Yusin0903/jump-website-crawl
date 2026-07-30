@@ -1,10 +1,16 @@
 import asyncio
+import os
 import random
 import time
 import aiohttp
 
 # JUMP SHOP 所有商品的 JSON API
 URL = "https://jumpshop-online.com/collections/all/products.json?limit=250"
+
+# --- 監控輪詢間隔 (秒) ---
+# 每隔幾秒對網站發送一次請求；可透過環境變數 REQUEST_INTERVAL 直接調整，
+# 不用改程式碼。間隔越大越不容易觸發限流。
+REQUEST_INTERVAL = int(os.getenv("REQUEST_INTERVAL", "60"))
 
 # --- 速率限制 (HTTP 429) 退避設定 ---
 # Shopify / Cloudflare 對未授權的 products.json 端點有速率限制與機器人偵測，
@@ -25,6 +31,16 @@ _consecutive_failures = 0
 
 class RateLimitedError(Exception):
     """短期重試耗盡仍持續被限流 (429) 時拋出，用來觸發斷路器冷卻。"""
+
+
+def is_rate_limited():
+    """目前是否處於被限流的冷卻期。"""
+    return time.monotonic() < _cooldown_until
+
+
+def cooldown_remaining():
+    """距離冷卻結束還剩幾秒 (未在冷卻中則為 0)。"""
+    return max(0.0, _cooldown_until - time.monotonic())
 
 # 單獨執行 main.py 時預設抓取的作品清單
 STANDALONE_TARGET_SERIES = [
@@ -261,10 +277,10 @@ async def _standalone_loop():
                     elif change['type'] == 'soldout':
                         print(f"⚪ 剛售罄: {change['title']}")
 
-                await asyncio.sleep(60)  # 降低請求頻率，避免觸發 Shopify 速率限制 (429)
+                await asyncio.sleep(REQUEST_INTERVAL)  # 降低請求頻率，避免觸發 Shopify 速率限制 (429)
             except Exception as e:
                 print(f"發生未預期錯誤: {e}")
-                await asyncio.sleep(60)
+                await asyncio.sleep(REQUEST_INTERVAL)
 
 
 if __name__ == "__main__":
