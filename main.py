@@ -12,30 +12,6 @@ URL = "https://jumpshop-online.com/collections/all/products.json?limit=250"
 # 不用改程式碼。間隔越大越不容易觸發限流。
 REQUEST_INTERVAL = int(os.getenv("REQUEST_INTERVAL", "60"))
 
-# --- Proxy 輪替 (rotating outbound IP) ---
-# 以逗號分隔設定多個 proxy，程式會「每次請求輪流換一個出口 IP」，被限流或
-# proxy 連線失敗時也會自動切換到下一個，藉此繞過針對單一 IP 的限流/封鎖。
-# 例：PROXIES="http://user:pass@host1:port,http://host2:port,socks5://host3:port"
-# 未設定時走直連 (維持原本行為)。
-PROXIES = [p.strip() for p in os.getenv("PROXIES", "").split(",") if p.strip()]
-_proxy_index = 0
-
-# 每輪最多嘗試幾個 proxy 就放棄本輪 (避免一次把幾十個死掉的免費 proxy 全試一遍
-# 而卡住十幾分鐘)。輪替是全域的，跨多輪仍會逐步用到清單裡所有 proxy。
-PROXY_MAX_ATTEMPTS = int(os.getenv("PROXY_MAX_ATTEMPTS", "5"))
-# 使用 proxy 時的單次請求逾時 (秒)；免費 proxy 常常是死的，縮短逾時可快速跳過。
-PROXY_TIMEOUT = int(os.getenv("PROXY_TIMEOUT", "8"))
-
-
-def _next_proxy():
-    """輪替取得下一個 proxy；未設定時回傳 None (直連)。"""
-    global _proxy_index
-    if not PROXIES:
-        return None
-    proxy = PROXIES[_proxy_index % len(PROXIES)]
-    _proxy_index += 1
-    return proxy
-
 
 # --- 速率限制 (HTTP 429) 退避設定 ---
 # Shopify / Cloudflare 對未授權的 products.json 端點有速率限制與機器人偵測，
@@ -112,33 +88,21 @@ def _retry_after_seconds(response, attempt):
 
 
 async def _fetch_page(session: aiohttp.ClientSession, page: int):
-    """請求單一頁面，內建 429 短期指數退避重試。
+    """請求單一頁面：被限流 (429) 時等待後再重打。
 
     回傳商品 list；若連線失敗則回傳 None；若短期重試後仍持續被限流則拋出
     RateLimitedError 以觸發斷路器冷卻。
     """
     paginated_url = f"{URL}&page={page}"
-    # 有 proxy 池時，最多輪試 PROXY_MAX_ATTEMPTS 個出口 IP 就放棄本輪，
-    # 避免一次把幾十個死掉的免費 proxy 全試一遍而卡很久。
-    retries = min(len(PROXIES), PROXY_MAX_ATTEMPTS) if PROXIES else MAX_RETRIES
-    # 使用 proxy 時縮短單次逾時 (讓死掉的 proxy 快速失敗跳過)；直連時沿用 session 預設
-    extra = {}
-    if PROXIES:
-        extra["timeout"] = aiohttp.ClientTimeout(total=PROXY_TIMEOUT)
-    for attempt in range(retries + 1):
-        proxy = _next_proxy()  # 每次嘗試輪替一個出口 IP (未設定時為 None=直連)
+    for attempt in range(MAX_RETRIES + 1):
         try:
-            async with session.get(paginated_url, proxy=proxy, **extra) as response:
+            async with session.get(paginated_url) as response:
                 if response.status == 429:
-                    if attempt >= retries:
+                    if attempt >= MAX_RETRIES:
                         raise RateLimitedError(page)
-                    if PROXIES:
-                        wait = random.uniform(0.5, 1.5)  # 換 IP 即可，短暫停頓
-                        note = "，切換下一個 proxy"
-                    else:
-                        wait = _retry_after_seconds(response, attempt)
-                        note = ""
-                    print(f"被限流 (HTTP 429){note}，{wait:.1f} 秒後重試 ({attempt + 1}/{retries})")
+                    # 被限流 -> 等待 (優先採用 Retry-After，否則指數退避) 後再重打
+                    wait = _retry_after_seconds(response, attempt)
+                    print(f"被限流 (HTTP 429)，{wait:.1f} 秒後重試 ({attempt + 1}/{MAX_RETRIES})")
                     await asyncio.sleep(wait)
                     continue
                 if response.status != 200:
@@ -146,16 +110,11 @@ async def _fetch_page(session: aiohttp.ClientSession, page: int):
                     return None
                 data = await response.json()
                 return data.get('products', [])
-        except (asyncio.TimeoutError, aiohttp.ClientError) as e:
-            # 使用 proxy 時，連線失敗 (proxy 掛掉/逾時) 就換下一個 proxy 重試
-            if PROXIES and attempt < retries:
-                print(f"連線失敗 ({e})，切換下一個 proxy 重試 ({attempt + 1}/{retries})")
-                await asyncio.sleep(random.uniform(0.5, 1.5))
-                continue
-            if isinstance(e, asyncio.TimeoutError):
-                print(f"第 {page} 頁請求逾時")
-            else:
-                print(f"發生連線錯誤: {e}")
+        except asyncio.TimeoutError:
+            print(f"第 {page} 頁請求逾時")
+            return None
+        except aiohttp.ClientError as e:
+            print(f"發生連線錯誤: {e}")
             return None
     return None
 
