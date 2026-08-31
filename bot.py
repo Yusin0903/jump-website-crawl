@@ -1,6 +1,8 @@
 import discord
 from discord.ext import commands, tasks
 import os
+import sys
+import logging
 import aiohttp
 from aiohttp import web
 from dotenv import load_dotenv
@@ -442,4 +444,7 @@ if __name__ == "__main__":
     if not TOKEN:
         print("Error: DISCORD_TOKEN not found in environment variables.")
     else:
-        bot.run(TOKEN)
+        # 讓 discord.py 的 log 走 stdout，而不是預設的 stderr，
+        # 避免部署平台 (Railway/Zeabur 等) 把正常的 INFO 訊息標成 error。
+        log_handler = logging.StreamHandler(sys.stdout)
+        bot.run(TOKEN, log_handler=log_handler, log_level=logging.INFO)
