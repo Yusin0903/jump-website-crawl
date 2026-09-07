@@ -93,6 +93,9 @@ def update_series_cache(products):
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user.name} (ID: {bot.user.id})')
+    # 印出行程 PID 與目前設定：若同時有兩個實例在跑，PID 會不同，一眼看穿重複部署
+    print(f'[startup] pid={os.getpid()} notify_soldout={config.get("notify_soldout")} '
+          f'monitoring_channels={sorted(monitoring_channels)}')
     invite_link = discord.utils.oauth_url(bot.user.id, permissions=discord.Permissions(administrator=True), scopes=("bot", "applications.commands"))
     print(f'Invite link: {invite_link}')
 
@@ -129,6 +132,14 @@ async def on_ready():
 
     # Start health check HTTP server for Zeabur (and other PaaS) probes
     await start_health_server()
+
+
+@bot.event
+async def on_app_command_completion(interaction: discord.Interaction, command):
+    """記錄每一個成功執行的 slash 指令 (誰、在哪個頻道、執行什麼)。"""
+    user = interaction.user
+    print(f"[cmd] pid={os.getpid()} /{command.qualified_name} "
+          f"by {user} ({user.id}) in channel {interaction.channel_id}")
 
 
 async def health_handler(request):
@@ -294,6 +305,7 @@ async def toggle_soldout_cmd(interaction: discord.Interaction, enable: bool):
     await interaction.response.defer()
     config["notify_soldout"] = enable
     save_config()
+    print(f"[toggle_soldout] pid={os.getpid()} notify_soldout -> {enable}")
     status = "開啟" if enable else "關閉"
     await interaction.followup.send(f"✅ 已**{status}**售罄通知。")
 
