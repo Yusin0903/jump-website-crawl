@@ -309,6 +309,40 @@ async def toggle_soldout_cmd(interaction: discord.Interaction, enable: bool):
     status = "開啟" if enable else "關閉"
     await interaction.followup.send(f"✅ 已**{status}**售罄通知。")
 
+@bot.tree.command(name="config", description="顯示目前所有設定狀態 (除錯用)")
+async def show_config_cmd(interaction: discord.Interaction):
+    """把記憶體中的設定 + 磁碟上的設定檔一起秀出來，方便確認 config 有沒有正確讀寫。"""
+    await interaction.response.defer(ephemeral=True)
+
+    # 記憶體中目前生效的設定
+    mem = (
+        f"notify_soldout = {config.get('notify_soldout')}\n"
+        f"追蹤作品 ({len(monitored_series)}): {', '.join(sorted(monitored_series)) or '(無)'}\n"
+        f"監控頻道 ({len(monitoring_channels)}): {sorted(monitoring_channels) or '(無)'}"
+    )
+
+    # 磁碟上的設定檔內容 (直接重讀，不是記憶體)
+    exists = os.path.exists(CONFIG_FILE)
+    if exists:
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                disk = f.read()
+        except Exception as e:
+            disk = f"(讀取失敗: {e})"
+    else:
+        disk = "(檔案不存在！很可能沒掛 Volume 或 DATA_DIR 沒對，設定不會被保存)"
+    if len(disk) > 1400:
+        disk = disk[:1400] + "\n...(已截斷)"
+
+    msg = (
+        f"🔧 **目前設定狀態**\n"
+        f"pid: `{os.getpid()}`　DATA_DIR: `{DATA_DIR}`\n"
+        f"設定檔: `{CONFIG_FILE}`　(存在: {exists})\n\n"
+        f"**[記憶體中 — 目前生效的]**\n```\n{mem}\n```\n"
+        f"**[磁碟檔案內容]**\n```json\n{disk}\n```"
+    )
+    await interaction.followup.send(msg)
+
 @bot.tree.command(name="help", description="顯示機器人功能與使用步驟教學")
 async def help_cmd(interaction: discord.Interaction):
     embed = discord.Embed(
