@@ -175,6 +175,23 @@ async def fetch_products(session: aiohttp.ClientSession | None = None):
     return all_products
 
 
+def _product_extra(p):
+    """取出通知會用到的額外欄位：主圖、最低價、可購買的 variant id (給加入購物車用)。"""
+    image = p['images'][0]['src'] if p.get('images') else None
+    variants = p.get('variants', [])
+    prices = []
+    for v in variants:
+        try:
+            prices.append(float(v['price']))
+        except (KeyError, TypeError, ValueError):
+            pass
+    price = min(prices) if prices else None
+    variant_id = next((v.get('id') for v in variants if v.get('available')), None)
+    if variant_id is None and variants:
+        variant_id = variants[0].get('id')
+    return {"image": image, "price": price, "variant_id": variant_id}
+
+
 async def monitor_check(current_stock_status, session: aiohttp.ClientSession | None = None, products=None):
     """第二階段：持續對比狀態變化，返回變化列表
 
@@ -190,6 +207,7 @@ async def monitor_check(current_stock_status, session: aiohttp.ClientSession | N
         p_title = p['title']
         is_available = any(v['available'] for v in p['variants'])
         product_url = f"https://jumpshop-online.com/products/{p['handle']}"
+        extra = _product_extra(p)  # 圖片 / 價格 / variant id
 
         if p_id in current_stock_status:
             # --- 舊商品邏輯 (監控庫存變化) ---
@@ -200,7 +218,8 @@ async def monitor_check(current_stock_status, session: aiohttp.ClientSession | N
                 changes.append({
                     "type": "restock",
                     "title": p_title,
-                    "url": product_url
+                    "url": product_url,
+                    **extra,
                 })
             # 狀態：有貨 -> 沒貨 (售罄通知)
             elif old_status and not is_available:
@@ -214,13 +233,15 @@ async def monitor_check(current_stock_status, session: aiohttp.ClientSession | N
                 changes.append({
                     "type": "new_arrival_buyable",
                     "title": p_title,
-                    "url": product_url
+                    "url": product_url,
+                    **extra,
                 })
             else:
                 changes.append({
                     "type": "new_arrival_coming_soon",
                     "title": p_title,
-                    "url": product_url
+                    "url": product_url,
+                    **extra,
                 })
 
         new_stock_status[p_id] = is_available

@@ -47,7 +47,8 @@ config = {
     ],
     "notify_soldout": True,
     "monitoring_channels": [],
-    "request_interval": REQUEST_INTERVAL  # 檢查頻率(秒)；預設取自環境變數，之後可即時修改並存檔
+    "request_interval": REQUEST_INTERVAL,  # 檢查頻率(秒)；預設取自環境變數，之後可即時修改並存檔
+    "mention": None  # 補貨/新品通知時要標記的對象 (角色或成員的 mention 字串)，None = 不標記
 }
 monitored_series = set(config["monitored_series"])
 
@@ -410,6 +411,8 @@ def build_dashboard_embed(channel_id):
                     value=f"**`{'監控中' if this_channel_on else '未開啟'}`**", inline=True)
     embed.add_field(name="⏱️ 檢查頻率",
                     value=f"**`{current_interval()}s`**", inline=True)
+    embed.add_field(name="🔖 補貨標記",
+                    value=config.get("mention") or "未設定", inline=True)
 
     if monitored_series:
         s = "\n".join(f"　• {x}" for x in sorted(monitored_series))
@@ -471,6 +474,25 @@ def _dashboard_series_options():
             continue
         options.append(discord.SelectOption(label=s[:100], value=s[:100]))
     return options
+
+
+class MentionSelect(discord.ui.MentionableSelect):
+    """選補貨/新品時要標記(@)的對象：角色或成員；不選＝不標記。"""
+
+    def __init__(self):
+        super().__init__(
+            placeholder="🔖 補貨/新品時要標記誰（選角色或成員；清空＝不標記）",
+            min_values=0, max_values=1, custom_id="dash:mention", row=3,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        config["mention"] = self.values[0].mention if self.values else None
+        save_config()
+        print(f"[dashboard] pid={os.getpid()} mention -> {config['mention']} by {interaction.user}")
+        await interaction.response.edit_message(
+            embed=build_dashboard_embed(interaction.channel_id),
+            view=DashboardView(interaction.channel_id),
+        )
 
 
 class DashboardView(discord.ui.View):
@@ -536,6 +558,9 @@ class DashboardView(discord.ui.View):
             )
         sel.callback = self._on_series_select
         self.add_item(sel)
+
+        # 補貨/新品要標記誰（角色或成員）
+        self.add_item(MentionSelect())
 
     async def _on_series_select(self, interaction: discord.Interaction):
         selected = {v for v in interaction.data.get("values", []) if v != "__none__"}
@@ -605,6 +630,11 @@ async def custom_config_cmd(interaction: discord.Interaction):
     embed.add_field(
         name="⏱️ 檢查頻率",
         value=f"每 {current_interval()} 秒檢查一次",
+        inline=True,
+    )
+    embed.add_field(
+        name="🔖 補貨標記",
+        value=config.get("mention") or "未設定",
         inline=True,
     )
     embed.add_field(
@@ -688,6 +718,49 @@ async def on_command_error(ctx, error):
     print(f"Error executing command {ctx.command}: {error}")
     await ctx.send(f"An error occurred: {error}")
 
+SHOP_BASE = "https://jumpshop-online.com"
+
+
+def _format_price(price):
+    """把價格數字格式化成 ¥1,650 這種；JPY 無小數。"""
+    if price is None:
+        return None
+    try:
+        f = float(price)
+    except (TypeError, ValueError):
+        return None
+    return f"¥{int(f):,}" if f == int(f) else f"¥{f:,.2f}"
+
+
+def _cart_url(variant_id):
+    """Shopify 一鍵加入購物車連結。"""
+    return f"{SHOP_BASE}/cart/{variant_id}:1" if variant_id else None
+
+
+def build_product_embed(change):
+    """依變動類型組出含縮圖 / 價格 / 購買連結的通知 embed。soldout 不走這裡。"""
+    presets = {
+        "restock": ("🔔 補貨通知！", 0x2ECC71, "現在可以購買了！"),
+        "new_arrival_buyable": ("✨ 新品上架！(現貨可買)", 0x00BCD4, "上架並可以購買了！"),
+        "new_arrival_coming_soon": ("👀 發現新品頁面！(尚未開賣)", 0x9E9E9E, "頁面已建立，目前無庫存，可能即將開賣。"),
+    }
+    t = change.get("type")
+    if t not in presets:
+        return None
+    title, color, tag = presets[t]
+    price = _format_price(change.get("price"))
+    desc = f"**{change['title']}**\n" + (f"💰 {price}\n" if price else "") + tag
+    embed = discord.Embed(title=title, description=desc, url=change.get("url"), color=color)
+    if change.get("image"):
+        embed.set_thumbnail(url=change["image"])
+    links = f"[🛒 商品頁]({change.get('url')})"
+    cart = _cart_url(change.get("variant_id"))
+    if cart and t != "new_arrival_coming_soon":
+        links += f"　|　[⚡ 加入購物車]({cart})"
+    embed.add_field(name="​", value=links, inline=False)
+    return embed
+
+
 async def broadcast(message):
     """對所有監控頻道發送純文字訊息。"""
     for channel_id in monitoring_channels:
@@ -738,37 +811,22 @@ async def monitor_task():
                 filtered_changes.append(change)
 
         if filtered_changes:
+            mention = config.get("mention")  # 補貨/新品時要標記的對象 (None = 不標記)
+            allowed = discord.AllowedMentions(roles=True, users=True, everyone=False)
             for channel_id in monitoring_channels:
                 channel = bot.get_channel(channel_id)
-                if channel:
-                    for change in filtered_changes:
-                        if change['type'] == 'restock':
-                            embed = discord.Embed(
-                                title="🔔 補貨通知！",
-                                description=f"**{change['title']}** 現在可以購買了！",
-                                url=change['url'],
-                                color=0x00ff00
-                            )
-                            await channel.send(embed=embed)
-                        elif change['type'] == 'soldout':
-                            if config.get("notify_soldout", True):
-                                await channel.send(f"⚪ 剛售罄: **{change['title']}**")
-                        elif change['type'] == 'new_arrival_buyable':
-                            embed = discord.Embed(
-                                title="✨ 新品上架！(現貨可買)",
-                                description=f"**{change['title']}** 上架並可以購買了！",
-                                url=change['url'],
-                                color=0x00ffff # Cyan
-                            )
-                            await channel.send(embed=embed)
-                        elif change['type'] == 'new_arrival_coming_soon':
-                            embed = discord.Embed(
-                                title="👀 發現新品頁面！(尚未開賣)",
-                                description=f"**{change['title']}** 頁面已建立，但目前無庫存。\n可能即將開賣，請密切關注！",
-                                url=change['url'],
-                                color=0x808080 # Grey
-                            )
-                            await channel.send(embed=embed)
+                if not channel:
+                    continue
+                for change in filtered_changes:
+                    if change['type'] == 'soldout':
+                        if config.get("notify_soldout", True):
+                            await channel.send(f"⚪ 剛售罄: **{change['title']}**")
+                        continue
+                    embed = build_product_embed(change)
+                    if embed is None:
+                        continue
+                    # 補貨/新品才 @ 標記對象；售罄不標記
+                    await channel.send(content=mention or None, embed=embed, allowed_mentions=allowed)
     except Exception as e:
         print(f"Error in monitor task: {e}")
 
