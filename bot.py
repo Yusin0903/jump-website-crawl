@@ -28,6 +28,7 @@ cached_series = []
 http_session: aiohttp.ClientSession | None = None
 health_server_started = False
 rate_limit_notified = False  # 是否已對頻道發出「被限流」通知 (避免重複洗頻)
+dashboard_registered = False  # 是否已註冊持久化的 dashboard 按鈕 view
 
 import json
 
@@ -129,6 +130,12 @@ async def on_ready():
 
     if not monitor_task.is_running():
         monitor_task.start()
+
+    # 註冊持久化的 dashboard 按鈕 (讓重開機後舊訊息的按鈕仍可點)
+    global dashboard_registered
+    if not dashboard_registered:
+        bot.add_view(DashboardView())
+        dashboard_registered = True
 
     # Start health check HTTP server for Zeabur (and other PaaS) probes
     await start_health_server()
@@ -343,6 +350,117 @@ async def show_config_cmd(interaction: discord.Interaction):
     )
     await interaction.followup.send(msg)
 
+def build_dashboard_embed(channel_id):
+    """組出 dashboard 面板的 embed (白話版設定總覽)。"""
+    soldout_on = config.get("notify_soldout", True)
+    this_channel_on = channel_id in monitoring_channels
+
+    embed = discord.Embed(
+        title="🎛️ Jump Shop 監控面板",
+        description="點下方按鈕即可直接操作，不用輸入指令。",
+        color=0x5865F2,
+    )
+    embed.add_field(name="🔔 售罄通知",
+                    value="✅ 開啟" if soldout_on else "🔕 關閉", inline=True)
+    embed.add_field(name="📡 本頻道通知",
+                    value="✅ 開啟中" if this_channel_on else "⚠️ 未開啟", inline=True)
+    embed.add_field(name="⏱️ 檢查頻率",
+                    value=f"每 {REQUEST_INTERVAL} 秒", inline=True)
+
+    if monitored_series:
+        s = "、".join(sorted(monitored_series))
+        if len(s) > 1000:
+            s = s[:1000] + "…"
+    else:
+        s = "（尚未追蹤任何作品，用 `/add_series` 新增）"
+    embed.add_field(name=f"📚 追蹤中的作品（{len(monitored_series)}）", value=s, inline=False)
+    embed.set_footer(text="補貨與新品上架一律會通知；售罄通知可用下方按鈕開關")
+    return embed
+
+
+class DashboardView(discord.ui.View):
+    """可點擊操作的監控面板；timeout=None + custom_id 讓它重開機後仍可用。"""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="售罄通知 開/關", emoji="🔔",
+                       style=discord.ButtonStyle.primary, custom_id="dash:toggle_soldout")
+    async def toggle_soldout_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        config["notify_soldout"] = not config.get("notify_soldout", True)
+        save_config()
+        print(f"[dashboard] pid={os.getpid()} notify_soldout -> {config['notify_soldout']} by {interaction.user}")
+        await interaction.response.edit_message(embed=build_dashboard_embed(interaction.channel_id), view=self)
+
+    @discord.ui.button(label="本頻道通知 開/關", emoji="📡",
+                       style=discord.ButtonStyle.success, custom_id="dash:toggle_monitor")
+    async def toggle_monitor_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cid = interaction.channel_id
+        if cid in monitoring_channels:
+            monitoring_channels.discard(cid)
+        else:
+            monitoring_channels.add(cid)
+        save_config()
+        print(f"[dashboard] pid={os.getpid()} monitor[{cid}] -> {cid in monitoring_channels} by {interaction.user}")
+        await interaction.response.edit_message(embed=build_dashboard_embed(cid), view=self)
+
+    @discord.ui.button(label="重新整理", emoji="🔄",
+                       style=discord.ButtonStyle.secondary, custom_id="dash:refresh")
+    async def refresh_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=build_dashboard_embed(interaction.channel_id), view=self)
+
+
+@bot.tree.command(name="dashboard", description="開啟可點擊操作的監控面板")
+async def dashboard_cmd(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        embed=build_dashboard_embed(interaction.channel_id),
+        view=DashboardView(),
+    )
+
+@bot.tree.command(name="custom-config", description="查看目前的監控設定 (所有人都看得到)")
+async def custom_config_cmd(interaction: discord.Interaction):
+    """白話版設定總覽，公開顯示給所有人 (不含 pid / 檔案路徑等除錯資訊)。"""
+    await interaction.response.defer()  # 公開，非 ephemeral
+
+    soldout_on = config.get("notify_soldout", True)
+    this_channel_on = interaction.channel_id in monitoring_channels
+
+    embed = discord.Embed(
+        title="📋 目前的監控設定",
+        description="這是機器人現在的運作方式：",
+        color=0x5865F2,
+    )
+    embed.add_field(
+        name="🔔 售罄通知",
+        value="✅ 開啟（商品賣完會通知）" if soldout_on else "🔕 關閉（商品賣完不會通知）",
+        inline=True,
+    )
+    embed.add_field(
+        name="⏱️ 檢查頻率",
+        value=f"每 {REQUEST_INTERVAL} 秒檢查一次",
+        inline=True,
+    )
+    embed.add_field(
+        name="📡 通知頻道",
+        value=(f"目前有 **{len(monitoring_channels)}** 個頻道開啟通知\n"
+               + ("✅ 本頻道有開啟" if this_channel_on
+                  else "⚠️ 本頻道尚未開啟（用 `/monitor` 開啟）")),
+        inline=False,
+    )
+    if monitored_series:
+        series_text = "\n".join(f"・{s}" for s in sorted(monitored_series))
+        if len(series_text) > 1000:
+            series_text = series_text[:1000] + "\n…（還有更多）"
+    else:
+        series_text = "（尚未追蹤任何作品，用 `/add_series` 新增）"
+    embed.add_field(
+        name=f"📚 追蹤中的作品（{len(monitored_series)}）",
+        value=series_text,
+        inline=False,
+    )
+    embed.set_footer(text="補貨與新品上架一律會通知；售罄通知可用 /toggle_soldout 開關")
+    await interaction.followup.send(embed=embed)
+
 @bot.tree.command(name="help", description="顯示機器人功能與使用步驟教學")
 async def help_cmd(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -351,8 +469,12 @@ async def help_cmd(interaction: discord.Interaction):
         color=discord.Color.blue()
     )
     
-    embed.add_field(name="📍 1. 開啟/關閉頻道通知", 
-                    value="使用 `/monitor` 可以在當前頻道開啟通知。\n使用 `/stop` 可以停止此頻道的通知。", 
+    embed.add_field(name="🎛️ 0. 一鍵操作面板 (推薦)",
+                    value="使用 `/dashboard` 開啟可點擊的面板，用按鈕直接切換設定，不用一直打指令。",
+                    inline=False)
+
+    embed.add_field(name="📍 1. 開啟/關閉頻道通知",
+                    value="使用 `/monitor` 可以在當前頻道開啟通知。\n使用 `/stop` 可以停止此頻道的通知。",
                     inline=False)
     
     embed.add_field(name="📚 2. 管理追蹤的作品 (支援自動完成)", 
@@ -361,8 +483,9 @@ async def help_cmd(interaction: discord.Interaction):
                           "使用 `/list_series` 檢視目前所有追蹤中的清單。", 
                     inline=False)
     
-    embed.add_field(name="⚙️ 3. 其他設定", 
-                    value="使用 `/toggle_soldout` 設定是否要接收「售罄(無庫存)」的推播通知。", 
+    embed.add_field(name="⚙️ 3. 其他設定",
+                    value="使用 `/toggle_soldout` 設定是否要接收「售罄(無庫存)」的推播通知。\n"
+                          "使用 `/custom-config` 查看目前的監控設定總覽。",
                     inline=False)
 
     embed.add_field(name="🔍 4. 查詢商品狀態", 
