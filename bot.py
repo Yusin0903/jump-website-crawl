@@ -351,50 +351,97 @@ async def show_config_cmd(interaction: discord.Interaction):
     await interaction.followup.send(msg)
 
 def build_dashboard_embed(channel_id):
-    """組出 dashboard 面板的 embed (白話版設定總覽)。"""
+    """組出 dashboard 面板的 embed；顏色與狀態列會依目前狀態即時變化。"""
     soldout_on = config.get("notify_soldout", True)
     this_channel_on = channel_id in monitoring_channels
+    rate_limited = main.is_rate_limited()
+
+    if rate_limited:
+        color, status = 0xF1C40F, "🟡 目前被網站限流，暫停抓取中"
+    elif this_channel_on:
+        color, status = 0x2ECC71, "🟢 監控運作中"
+    else:
+        color, status = 0x95A5A6, "⚪ 本頻道尚未開啟通知"
 
     embed = discord.Embed(
-        title="🎛️ Jump Shop 監控面板",
-        description="點下方按鈕即可直接操作，不用輸入指令。",
-        color=0x5865F2,
+        title="🎛️　Jump Shop 監控面板",
+        description=f"**{status}**\n用下方按鈕直接操作，不用輸入指令。",
+        color=color,
     )
+    # 三個狀態小卡 (用 code 樣式做成 chip)
     embed.add_field(name="🔔 售罄通知",
-                    value="✅ 開啟" if soldout_on else "🔕 關閉", inline=True)
-    embed.add_field(name="📡 本頻道通知",
-                    value="✅ 開啟中" if this_channel_on else "⚠️ 未開啟", inline=True)
+                    value=f"**`{'開啟' if soldout_on else '關閉'}`**", inline=True)
+    embed.add_field(name="📡 本頻道",
+                    value=f"**`{'監控中' if this_channel_on else '未開啟'}`**", inline=True)
     embed.add_field(name="⏱️ 檢查頻率",
-                    value=f"每 {REQUEST_INTERVAL} 秒", inline=True)
+                    value=f"**`{REQUEST_INTERVAL}s`**", inline=True)
 
     if monitored_series:
-        s = "、".join(sorted(monitored_series))
+        s = "\n".join(f"　• {x}" for x in sorted(monitored_series))
         if len(s) > 1000:
-            s = s[:1000] + "…"
+            s = s[:1000] + "\n　…"
     else:
-        s = "（尚未追蹤任何作品，用 `/add_series` 新增）"
-    embed.add_field(name=f"📚 追蹤中的作品（{len(monitored_series)}）", value=s, inline=False)
-    embed.set_footer(text="補貨與新品上架一律會通知；售罄通知可用下方按鈕開關")
+        s = "（尚未追蹤任何作品）"
+    embed.add_field(name=f"📚 追蹤中的作品　({len(monitored_series)})", value=s, inline=False)
+
+    embed.set_footer(text="補貨・新品一律通知　｜　售罄通知可用下方按鈕開關")
+    embed.timestamp = discord.utils.utcnow()
     return embed
 
 
 class DashboardView(discord.ui.View):
-    """可點擊操作的監控面板；timeout=None + custom_id 讓它重開機後仍可用。"""
+    """可點擊操作的監控面板。
 
-    def __init__(self):
+    - timeout=None + 固定 custom_id → 重開機後舊訊息的按鈕仍可用 (持久化)。
+    - 按鈕的顏色/文字會依目前狀態變化 (綠=開、灰/紅=關)，提供即時視覺回饋。
+    - 每次操作都重建一份反映最新狀態的 view，達成「點一下就更新」的體驗。
+    """
+
+    def __init__(self, channel_id=None):
         super().__init__(timeout=None)
+        soldout_on = config.get("notify_soldout", True)
+        monitor_on = channel_id in monitoring_channels if channel_id is not None else False
 
-    @discord.ui.button(label="售罄通知 開/關", emoji="🔔",
-                       style=discord.ButtonStyle.primary, custom_id="dash:toggle_soldout")
-    async def toggle_soldout_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        b_soldout = discord.ui.Button(
+            label="售罄通知：開啟" if soldout_on else "售罄通知：關閉",
+            emoji="🔔" if soldout_on else "🔕",
+            style=discord.ButtonStyle.success if soldout_on else discord.ButtonStyle.secondary,
+            custom_id="dash:toggle_soldout", row=0,
+        )
+        b_soldout.callback = self._toggle_soldout
+
+        b_monitor = discord.ui.Button(
+            label="本頻道通知：監控中" if monitor_on else "本頻道通知：未開啟",
+            emoji="📡" if monitor_on else "📴",
+            style=discord.ButtonStyle.success if monitor_on else discord.ButtonStyle.danger,
+            custom_id="dash:toggle_monitor", row=0,
+        )
+        b_monitor.callback = self._toggle_monitor
+
+        b_refresh = discord.ui.Button(
+            label="重新整理", emoji="🔄",
+            style=discord.ButtonStyle.secondary, custom_id="dash:refresh", row=1,
+        )
+        b_refresh.callback = self._refresh
+
+        self.add_item(b_soldout)
+        self.add_item(b_monitor)
+        self.add_item(b_refresh)
+
+    async def _rerender(self, interaction: discord.Interaction):
+        # 用反映最新狀態的 embed + view 就地更新訊息
+        await interaction.response.edit_message(
+            embed=build_dashboard_embed(interaction.channel_id),
+            view=DashboardView(interaction.channel_id),
+        )
+
+    async def _toggle_soldout(self, interaction: discord.Interaction):
         config["notify_soldout"] = not config.get("notify_soldout", True)
         save_config()
         print(f"[dashboard] pid={os.getpid()} notify_soldout -> {config['notify_soldout']} by {interaction.user}")
-        await interaction.response.edit_message(embed=build_dashboard_embed(interaction.channel_id), view=self)
+        await self._rerender(interaction)
 
-    @discord.ui.button(label="本頻道通知 開/關", emoji="📡",
-                       style=discord.ButtonStyle.success, custom_id="dash:toggle_monitor")
-    async def toggle_monitor_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _toggle_monitor(self, interaction: discord.Interaction):
         cid = interaction.channel_id
         if cid in monitoring_channels:
             monitoring_channels.discard(cid)
@@ -402,19 +449,17 @@ class DashboardView(discord.ui.View):
             monitoring_channels.add(cid)
         save_config()
         print(f"[dashboard] pid={os.getpid()} monitor[{cid}] -> {cid in monitoring_channels} by {interaction.user}")
-        await interaction.response.edit_message(embed=build_dashboard_embed(cid), view=self)
+        await self._rerender(interaction)
 
-    @discord.ui.button(label="重新整理", emoji="🔄",
-                       style=discord.ButtonStyle.secondary, custom_id="dash:refresh")
-    async def refresh_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(embed=build_dashboard_embed(interaction.channel_id), view=self)
+    async def _refresh(self, interaction: discord.Interaction):
+        await self._rerender(interaction)
 
 
 @bot.tree.command(name="dashboard", description="開啟可點擊操作的監控面板")
 async def dashboard_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(
         embed=build_dashboard_embed(interaction.channel_id),
-        view=DashboardView(),
+        view=DashboardView(interaction.channel_id),
     )
 
 @bot.tree.command(name="custom-config", description="查看目前的監控設定 (所有人都看得到)")
