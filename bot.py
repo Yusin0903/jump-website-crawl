@@ -384,9 +384,25 @@ def build_dashboard_embed(channel_id):
         s = "（尚未追蹤任何作品）"
     embed.add_field(name=f"📚 追蹤中的作品　({len(monitored_series)})", value=s, inline=False)
 
-    embed.set_footer(text="補貨・新品一律通知　｜　售罄通知可用下方按鈕開關")
+    embed.set_footer(text="按鈕切換設定　｜　下拉選單管理追蹤作品　｜　補貨・新品一律通知")
     embed.timestamp = discord.utils.utcnow()
     return embed
+
+
+def _dashboard_series_options():
+    """作品下拉選單的選項：已追蹤的預設打勾，其餘用偵測到的作品目錄補滿 (上限 25)。"""
+    options = []
+    for s in sorted(monitored_series):
+        if len(options) >= 25:
+            break
+        options.append(discord.SelectOption(label=s[:100], value=s[:100], default=True, emoji="✅"))
+    for s in sorted(cached_series):
+        if len(options) >= 25:
+            break
+        if s in monitored_series:
+            continue
+        options.append(discord.SelectOption(label=s[:100], value=s[:100]))
+    return options
 
 
 class DashboardView(discord.ui.View):
@@ -427,6 +443,34 @@ class DashboardView(discord.ui.View):
         self.add_item(b_soldout)
         self.add_item(b_monitor)
         self.add_item(b_refresh)
+
+        # 作品追蹤下拉選單：已追蹤預設打勾，勾選＝追蹤、取消＝停止追蹤
+        options = _dashboard_series_options()
+        if options:
+            sel = discord.ui.Select(
+                placeholder="📚 追蹤作品（可多選；取消勾選＝停止追蹤）",
+                min_values=0, max_values=len(options),
+                options=options, custom_id="dash:series", row=2,
+            )
+        else:
+            sel = discord.ui.Select(
+                placeholder="📚 尚無作品資料，稍後再試",
+                min_values=0, max_values=1, disabled=True,
+                options=[discord.SelectOption(label="（尚無資料）", value="__none__")],
+                custom_id="dash:series", row=2,
+            )
+        sel.callback = self._on_series_select
+        self.add_item(sel)
+
+    async def _on_series_select(self, interaction: discord.Interaction):
+        selected = {v for v in interaction.data.get("values", []) if v != "__none__"}
+        shown = {o.value for o in _dashboard_series_options()} - {"__none__"}
+        # 顯示中但沒被選 → 取消追蹤；被選的 → 加入追蹤 (沒顯示的作品不動)
+        monitored_series.difference_update(shown - selected)
+        monitored_series.update(selected)
+        save_config()
+        print(f"[dashboard] pid={os.getpid()} series -> {sorted(monitored_series)} by {interaction.user}")
+        await self._rerender(interaction)
 
     async def _rerender(self, interaction: discord.Interaction):
         # 用反映最新狀態的 embed + view 就地更新訊息
