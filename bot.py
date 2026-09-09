@@ -46,7 +46,8 @@ config = {
         "鬼滅の刃"
     ],
     "notify_soldout": True,
-    "monitoring_channels": []
+    "monitoring_channels": [],
+    "request_interval": REQUEST_INTERVAL  # 檢查頻率(秒)；預設取自環境變數，之後可即時修改並存檔
 }
 monitored_series = set(config["monitored_series"])
 
@@ -81,6 +82,29 @@ def save_config():
         json.dump(config, f, ensure_ascii=False, indent=2)
 
 load_config()
+
+# --- 檢查頻率 (可即時修改 + 存檔) ---
+MIN_INTERVAL = 10     # 秒；避免設太短一直觸發限流
+MAX_INTERVAL = 3600   # 秒
+
+def current_interval():
+    """目前生效的檢查頻率 (秒)，夾在允許範圍內。"""
+    try:
+        val = int(config.get("request_interval", REQUEST_INTERVAL))
+    except (TypeError, ValueError):
+        return REQUEST_INTERVAL
+    return max(MIN_INTERVAL, min(MAX_INTERVAL, val))
+
+def set_interval(seconds):
+    """設定檢查頻率：存檔 + 即時套用到監控迴圈 (不用重啟)。回傳實際生效的秒數。"""
+    seconds = max(MIN_INTERVAL, min(MAX_INTERVAL, int(seconds)))
+    config["request_interval"] = seconds
+    save_config()
+    try:
+        monitor_task.change_interval(seconds=seconds)  # discord.py：即時改迴圈間隔
+    except Exception as e:
+        print(f"change_interval 失敗: {e}")
+    return seconds
 
 def update_series_cache(products):
     """更新作品名稱快取"""
@@ -128,6 +152,8 @@ async def on_ready():
     except Exception as e:
         print(f"Error syncing commands: {e}")
 
+    # 套用存檔的檢查頻率 (可能與環境變數預設不同)
+    monitor_task.change_interval(seconds=current_interval())
     if not monitor_task.is_running():
         monitor_task.start()
 
@@ -316,6 +342,15 @@ async def toggle_soldout_cmd(interaction: discord.Interaction, enable: bool):
     status = "開啟" if enable else "關閉"
     await interaction.followup.send(f"✅ 已**{status}**售罄通知。")
 
+@bot.tree.command(name="set_interval", description="設定檢查頻率（秒），立即生效、不用重啟")
+@discord.app_commands.describe(seconds=f"每幾秒檢查一次（{MIN_INTERVAL}~{MAX_INTERVAL}）")
+async def set_interval_cmd(interaction: discord.Interaction, seconds: int):
+    await interaction.response.defer()
+    applied = set_interval(seconds)
+    print(f"[set_interval] pid={os.getpid()} request_interval -> {applied} by {interaction.user}")
+    note = "" if applied == seconds else f"（已自動調整到允許範圍 {MIN_INTERVAL}~{MAX_INTERVAL}）"
+    await interaction.followup.send(f"✅ 檢查頻率已設為 **每 {applied} 秒**，立即生效。{note}")
+
 @bot.tree.command(name="config", description="顯示目前所有設定狀態 (除錯用)")
 async def show_config_cmd(interaction: discord.Interaction):
     """把記憶體中的設定 + 磁碟上的設定檔一起秀出來，方便確認 config 有沒有正確讀寫。"""
@@ -374,7 +409,7 @@ def build_dashboard_embed(channel_id):
     embed.add_field(name="📡 本頻道",
                     value=f"**`{'監控中' if this_channel_on else '未開啟'}`**", inline=True)
     embed.add_field(name="⏱️ 檢查頻率",
-                    value=f"**`{REQUEST_INTERVAL}s`**", inline=True)
+                    value=f"**`{current_interval()}s`**", inline=True)
 
     if monitored_series:
         s = "\n".join(f"　• {x}" for x in sorted(monitored_series))
@@ -387,6 +422,39 @@ def build_dashboard_embed(channel_id):
     embed.set_footer(text="按鈕切換設定　｜　下拉選單管理追蹤作品　｜　補貨・新品一律通知")
     embed.timestamp = discord.utils.utcnow()
     return embed
+
+
+class IntervalModal(discord.ui.Modal, title="調整檢查頻率"):
+    """點「調整頻率」按鈕跳出的輸入框；送出後即時套用並更新面板。"""
+
+    def __init__(self, message):
+        super().__init__()
+        self.message = message
+        self.seconds = discord.ui.TextInput(
+            label=f"每幾秒檢查一次（{MIN_INTERVAL}~{MAX_INTERVAL}）",
+            default=str(current_interval()),
+            required=True, max_length=4,
+        )
+        self.add_item(self.seconds)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            val = int(str(self.seconds.value).strip())
+        except ValueError:
+            await interaction.response.send_message("⚠️ 請輸入數字。", ephemeral=True)
+            return
+        applied = set_interval(val)
+        print(f"[dashboard] pid={os.getpid()} request_interval -> {applied} by {interaction.user}")
+        try:
+            await self.message.edit(
+                embed=build_dashboard_embed(self.message.channel.id),
+                view=DashboardView(self.message.channel.id),
+            )
+        except Exception as e:
+            print(f"dashboard edit 失敗: {e}")
+        note = "" if applied == val else f"（已調整到允許範圍 {MIN_INTERVAL}~{MAX_INTERVAL}）"
+        await interaction.response.send_message(
+            f"✅ 檢查頻率已設為 **每 {applied} 秒**，立即生效。{note}", ephemeral=True)
 
 
 def _dashboard_series_options():
@@ -434,6 +502,12 @@ class DashboardView(discord.ui.View):
         )
         b_monitor.callback = self._toggle_monitor
 
+        b_interval = discord.ui.Button(
+            label="調整頻率", emoji="⏱️",
+            style=discord.ButtonStyle.secondary, custom_id="dash:interval", row=1,
+        )
+        b_interval.callback = self._open_interval_modal
+
         b_refresh = discord.ui.Button(
             label="重新整理", emoji="🔄",
             style=discord.ButtonStyle.secondary, custom_id="dash:refresh", row=1,
@@ -442,6 +516,7 @@ class DashboardView(discord.ui.View):
 
         self.add_item(b_soldout)
         self.add_item(b_monitor)
+        self.add_item(b_interval)
         self.add_item(b_refresh)
 
         # 作品追蹤下拉選單：已追蹤預設打勾，勾選＝追蹤、取消＝停止追蹤
@@ -498,6 +573,9 @@ class DashboardView(discord.ui.View):
     async def _refresh(self, interaction: discord.Interaction):
         await self._rerender(interaction)
 
+    async def _open_interval_modal(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(IntervalModal(interaction.message))
+
 
 @bot.tree.command(name="dashboard", description="開啟可點擊操作的監控面板")
 async def dashboard_cmd(interaction: discord.Interaction):
@@ -526,7 +604,7 @@ async def custom_config_cmd(interaction: discord.Interaction):
     )
     embed.add_field(
         name="⏱️ 檢查頻率",
-        value=f"每 {REQUEST_INTERVAL} 秒檢查一次",
+        value=f"每 {current_interval()} 秒檢查一次",
         inline=True,
     )
     embed.add_field(
