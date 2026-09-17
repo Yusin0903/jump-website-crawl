@@ -741,31 +741,43 @@ async def help_cmd(interaction: discord.Interaction):
         color=discord.Color.blue()
     )
     
-    embed.add_field(name="🎛️ 0. 一鍵操作面板 (推薦)",
-                    value="使用 `/dashboard` 開啟可點擊的面板，用按鈕直接切換設定，不用一直打指令。",
-                    inline=False)
+    embed.add_field(
+        name="🎛️ 0. 一鍵操作面板（最推薦）",
+        value="使用 `/dashboard` 開啟可點擊的面板，用**按鈕與選單**直接操作，不用一直打指令：\n"
+              "• 🔔 售罄通知開/關　• 📡 本頻道通知開/關\n"
+              "• ⏱️ 調整檢查頻率　• 🛒 設定加入購物車數量\n"
+              "• 📚 下拉選單管理追蹤作品　• 🔖 選要標記(@)的對象",
+        inline=False)
 
-    embed.add_field(name="📍 1. 開啟/關閉頻道通知",
-                    value="使用 `/monitor` 可以在當前頻道開啟通知。\n使用 `/stop` 可以停止此頻道的通知。",
-                    inline=False)
-    
-    embed.add_field(name="📚 2. 管理追蹤的作品 (支援自動完成)", 
-                    value="使用 `/add_series` 可以新增你想追蹤的作品。\n"
-                          "使用 `/remove_series` 可以移除不想追蹤的作品。\n"
-                          "使用 `/list_series` 檢視目前所有追蹤中的清單。", 
-                    inline=False)
-    
-    embed.add_field(name="⚙️ 3. 其他設定",
-                    value="使用 `/toggle_soldout` 設定是否要接收「售罄(無庫存)」的推播通知。\n"
-                          "使用 `/custom-config` 查看目前的監控設定總覽。",
-                    inline=False)
+    embed.add_field(
+        name="📍 1. 開啟/關閉頻道通知",
+        value="`/monitor` 在此頻道開啟通知；`/stop` 停止此頻道的通知。",
+        inline=False)
 
-    embed.add_field(name="🔍 4. 查詢商品狀態", 
-                    value="使用 `/series` 查詢某個作品目前的全部商品與庫存狀態。\n"
-                          "使用 `/all` 顯示所有抓取到的商品庫存總表（訊息較長）。", 
-                    inline=False)
-    
-    embed.set_footer(text="提示：使用 / 指令時，Discord 會跳出選項，直接點選即可！")
+    embed.add_field(
+        name="📚 2. 管理追蹤的作品",
+        value="`/add_series` 新增、`/remove_series` 移除（皆支援自動完成）、`/list_series` 檢視清單。\n"
+              "＊也可以直接用 `/dashboard` 的作品下拉選單勾選。",
+        inline=False)
+
+    embed.add_field(
+        name="⚙️ 3. 通知設定",
+        value="`/toggle_soldout` 售罄通知開關　｜　`/set_interval` 檢查頻率（秒，即時生效）\n"
+              "`/set_cart_qty` 加入購物車數量　｜　標記對象請用 `/dashboard` 的 🔖 選單",
+        inline=False)
+
+    embed.add_field(
+        name="🔍 4. 查詢與總覽",
+        value="`/series` 查某作品的庫存　｜　`/all` 全部庫存總表\n"
+              "`/custom-config` 白話版設定總覽　｜　`/config` 除錯用設定狀態",
+        inline=False)
+
+    embed.add_field(
+        name="🛒 關於通知",
+        value="補貨/新品通知會附上**縮圖、價格、商品頁與「加入購物車」連結**，一點就到結帳。",
+        inline=False)
+
+    embed.set_footer(text="提示：打 / 時 Discord 會跳出選項；日常操作建議直接用 /dashboard 面板。")
     
     await interaction.response.send_message(embed=embed)
 
