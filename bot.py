@@ -48,7 +48,8 @@ config = {
     "notify_soldout": True,
     "monitoring_channels": [],
     "request_interval": REQUEST_INTERVAL,  # 檢查頻率(秒)；預設取自環境變數，之後可即時修改並存檔
-    "mention": None  # 補貨/新品通知時要標記的對象 (角色或成員的 mention 字串)，None = 不標記
+    "mention": None,  # 補貨/新品通知時要標記的對象 (角色或成員的 mention 字串)，None = 不標記
+    "cart_qty": 1  # 「加入購物車」連結帶的數量；Shopify 會自動夾到實際可買上限
 }
 monitored_series = set(config["monitored_series"])
 
@@ -106,6 +107,22 @@ def set_interval(seconds):
     except Exception as e:
         print(f"change_interval 失敗: {e}")
     return seconds
+
+# --- 加入購物車數量 (可設定 + 存檔) ---
+MIN_QTY = 1
+MAX_QTY = 99   # 帶大一點沒關係，Shopify 會夾到實際可買上限
+
+def current_cart_qty():
+    try:
+        return max(MIN_QTY, min(MAX_QTY, int(config.get("cart_qty", 1))))
+    except (TypeError, ValueError):
+        return 1
+
+def set_cart_qty(qty):
+    qty = max(MIN_QTY, min(MAX_QTY, int(qty)))
+    config["cart_qty"] = qty
+    save_config()
+    return qty
 
 def update_series_cache(products):
     """更新作品名稱快取"""
@@ -352,6 +369,15 @@ async def set_interval_cmd(interaction: discord.Interaction, seconds: int):
     note = "" if applied == seconds else f"（已自動調整到允許範圍 {MIN_INTERVAL}~{MAX_INTERVAL}）"
     await interaction.followup.send(f"✅ 檢查頻率已設為 **每 {applied} 秒**，立即生效。{note}")
 
+@bot.tree.command(name="set_cart_qty", description="設定「加入購物車」連結帶的數量")
+@discord.app_commands.describe(qty=f"數量（{MIN_QTY}~{MAX_QTY}）；Shopify 會夾到實際可買上限")
+async def set_cart_qty_cmd(interaction: discord.Interaction, qty: int):
+    await interaction.response.defer()
+    applied = set_cart_qty(qty)
+    print(f"[set_cart_qty] pid={os.getpid()} cart_qty -> {applied} by {interaction.user}")
+    note = "" if applied == qty else f"（已自動調整到允許範圍 {MIN_QTY}~{MAX_QTY}）"
+    await interaction.followup.send(f"✅ 加入購物車數量已設為 **×{applied}**。{note}")
+
 @bot.tree.command(name="config", description="顯示目前所有設定狀態 (除錯用)")
 async def show_config_cmd(interaction: discord.Interaction):
     """把記憶體中的設定 + 磁碟上的設定檔一起秀出來，方便確認 config 有沒有正確讀寫。"""
@@ -413,6 +439,8 @@ def build_dashboard_embed(channel_id):
                     value=f"**`{current_interval()}s`**", inline=True)
     embed.add_field(name="🔖 補貨標記",
                     value=config.get("mention") or "未設定", inline=True)
+    embed.add_field(name="🛒 購買數量",
+                    value=f"**`×{current_cart_qty()}`**", inline=True)
 
     if monitored_series:
         s = "\n".join(f"　• {x}" for x in sorted(monitored_series))
@@ -458,6 +486,38 @@ class IntervalModal(discord.ui.Modal, title="調整檢查頻率"):
         note = "" if applied == val else f"（已調整到允許範圍 {MIN_INTERVAL}~{MAX_INTERVAL}）"
         await interaction.response.send_message(
             f"✅ 檢查頻率已設為 **每 {applied} 秒**，立即生效。{note}", ephemeral=True)
+
+
+class CartQtyModal(discord.ui.Modal, title="設定加入購物車數量"):
+    """點「購買數量」按鈕跳出的輸入框。"""
+
+    def __init__(self, message):
+        super().__init__()
+        self.message = message
+        self.qty = discord.ui.TextInput(
+            label=f"數量（{MIN_QTY}~{MAX_QTY}）",
+            default=str(current_cart_qty()),
+            required=True, max_length=2,
+        )
+        self.add_item(self.qty)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            val = int(str(self.qty.value).strip())
+        except ValueError:
+            await interaction.response.send_message("⚠️ 請輸入數字。", ephemeral=True)
+            return
+        applied = set_cart_qty(val)
+        print(f"[dashboard] pid={os.getpid()} cart_qty -> {applied} by {interaction.user}")
+        try:
+            await self.message.edit(
+                embed=build_dashboard_embed(self.message.channel.id),
+                view=DashboardView(self.message.channel.id),
+            )
+        except Exception as e:
+            print(f"dashboard edit 失敗: {e}")
+        await interaction.response.send_message(
+            f"✅ 加入購物車數量已設為 **×{applied}**。", ephemeral=True)
 
 
 def _dashboard_series_options():
@@ -530,6 +590,12 @@ class DashboardView(discord.ui.View):
         )
         b_interval.callback = self._open_interval_modal
 
+        b_cart = discord.ui.Button(
+            label="購買數量", emoji="🛒",
+            style=discord.ButtonStyle.secondary, custom_id="dash:cartqty", row=1,
+        )
+        b_cart.callback = self._open_cart_modal
+
         b_refresh = discord.ui.Button(
             label="重新整理", emoji="🔄",
             style=discord.ButtonStyle.secondary, custom_id="dash:refresh", row=1,
@@ -539,6 +605,7 @@ class DashboardView(discord.ui.View):
         self.add_item(b_soldout)
         self.add_item(b_monitor)
         self.add_item(b_interval)
+        self.add_item(b_cart)
         self.add_item(b_refresh)
 
         # 作品追蹤下拉選單：已追蹤預設打勾，勾選＝追蹤、取消＝停止追蹤
@@ -601,6 +668,9 @@ class DashboardView(discord.ui.View):
     async def _open_interval_modal(self, interaction: discord.Interaction):
         await interaction.response.send_modal(IntervalModal(interaction.message))
 
+    async def _open_cart_modal(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(CartQtyModal(interaction.message))
+
 
 @bot.tree.command(name="dashboard", description="開啟可點擊操作的監控面板")
 async def dashboard_cmd(interaction: discord.Interaction):
@@ -635,6 +705,11 @@ async def custom_config_cmd(interaction: discord.Interaction):
     embed.add_field(
         name="🔖 補貨標記",
         value=config.get("mention") or "未設定",
+        inline=True,
+    )
+    embed.add_field(
+        name="🛒 購買數量",
+        value=f"每次加入購物車 ×{current_cart_qty()}",
         inline=True,
     )
     embed.add_field(
@@ -732,9 +807,9 @@ def _format_price(price):
     return f"¥{int(f):,}" if f == int(f) else f"¥{f:,.2f}"
 
 
-def _cart_url(variant_id):
-    """Shopify 一鍵加入購物車連結。"""
-    return f"{SHOP_BASE}/cart/{variant_id}:1" if variant_id else None
+def _cart_url(variant_id, qty=1):
+    """Shopify 一鍵加入購物車連結 (帶數量；Shopify 會夾到實際可買上限)。"""
+    return f"{SHOP_BASE}/cart/{variant_id}:{qty}" if variant_id else None
 
 
 def build_product_embed(change):
@@ -754,9 +829,10 @@ def build_product_embed(change):
     if change.get("image"):
         embed.set_thumbnail(url=change["image"])
     links = f"[🛒 商品頁]({change.get('url')})"
-    cart = _cart_url(change.get("variant_id"))
+    qty = current_cart_qty()
+    cart = _cart_url(change.get("variant_id"), qty)
     if cart and t != "new_arrival_coming_soon":
-        links += f"　|　[⚡ 加入購物車]({cart})"
+        links += f"　|　[⚡ 加入購物車 ×{qty}]({cart})"
     embed.add_field(name="​", value=links, inline=False)
     return embed
 
