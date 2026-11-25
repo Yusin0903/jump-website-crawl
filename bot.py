@@ -378,6 +378,43 @@ async def set_cart_qty_cmd(interaction: discord.Interaction, qty: int):
     note = "" if applied == qty else f"（已自動調整到允許範圍 {MIN_QTY}~{MAX_QTY}）"
     await interaction.followup.send(f"✅ 加入購物車數量已設為 **×{applied}**。{note}")
 
+@bot.tree.command(name="ratelimit", description="查看被限流的頻率與 429 診斷")
+async def ratelimit_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    s = main.rate_limit_stats()
+
+    def ts(v):
+        return f"<t:{int(v)}:R>" if v else "—"
+
+    status = (f"🟡 冷卻中（還剩 {int(s['cooldown_remaining'])} 秒）"
+              if s["is_rate_limited"] else "🟢 正常")
+    lines = [
+        f"**狀態**：{status}",
+        f"**連續失敗**：{s['consecutive_failures']} 次　**運行**：{s['uptime']/3600:.1f} 小時",
+        "",
+        f"**請求**：{s['requests']}　**成功**：{s['ok']}　**429**：{s['http_429']}（{s['block_rate']*100:.0f}%）",
+        f"**斷路器跳閘**：{s['trips']} 次　**累計冷卻**：{s['cooldown_total']/60:.0f} 分鐘",
+        "",
+        f"**第一次 429**：{ts(s['first_429'])}",
+        f"**最近 429**：{ts(s['last_429'])}",
+        f"**最近成功**：{ts(s['last_ok'])}",
+    ]
+    hdr = s.get("last_429_headers")
+    if hdr:
+        lines.append("")
+        lines.append("**429 診斷標頭**")
+        lines += [f"・`{k}`: `{v}`" for k, v in hdr.items()]
+    else:
+        lines.append("")
+        lines.append("_(目前還沒抓到 429 的診斷標頭)_")
+
+    embed = discord.Embed(
+        title="📊 限流統計",
+        description="\n".join(lines),
+        color=0xF1C40F if s["is_rate_limited"] else 0x2ECC71,
+    )
+    await interaction.followup.send(embed=embed)
+
 @bot.tree.command(name="config", description="顯示目前所有設定狀態 (除錯用)")
 async def show_config_cmd(interaction: discord.Interaction):
     """把記憶體中的設定 + 磁碟上的設定檔一起秀出來，方便確認 config 有沒有正確讀寫。"""

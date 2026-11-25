@@ -29,6 +29,46 @@ COOLDOWN_MAX = 1800      # 冷卻時間上限 (30 分鐘)
 _cooldown_until = 0.0    # monotonic 時間戳；在此之前不發送任何請求
 _consecutive_failures = 0
 
+# --- 限流統計 (觀察「多頻繁被限流」用) ---
+_stats = {
+    "started": time.time(),      # 本次程式啟動時間 (epoch)
+    "requests": 0,               # 實際送出的頁面請求數
+    "ok": 0,                     # 200 成功次數
+    "http_429": 0,               # 收到 429 的次數
+    "trips": 0,                  # 斷路器跳閘(進入冷卻)次數
+    "cooldown_total": 0.0,       # 累計被冷卻的秒數
+    "first_429": None,           # 第一次 429 的時間 (epoch)
+    "last_429": None,            # 最近一次 429 的時間
+    "last_ok": None,             # 最近一次成功的時間
+    "last_429_headers": {},      # 最近一次 429 的診斷標頭
+}
+
+
+def _note_429(response):
+    """記一次 429，並擷取診斷用的回應標頭。"""
+    now = time.time()
+    _stats["http_429"] += 1
+    _stats["last_429"] = now
+    if _stats["first_429"] is None:
+        _stats["first_429"] = now
+    _stats["last_429_headers"] = {
+        k: response.headers.get(k)
+        for k in ("Retry-After", "cf-ray", "cf-cache-status", "server", "x-request-id")
+        if response.headers.get(k)
+    }
+
+
+def rate_limit_stats():
+    """回傳目前的限流統計快照 (給指令顯示用)。"""
+    s = dict(_stats)
+    s["is_rate_limited"] = is_rate_limited()
+    s["cooldown_remaining"] = cooldown_remaining()
+    s["consecutive_failures"] = _consecutive_failures
+    total = s["requests"] or 1
+    s["block_rate"] = s["http_429"] / total  # 429 佔所有請求的比例
+    s["uptime"] = time.time() - s["started"]
+    return s
+
 
 class RateLimitedError(Exception):
     """短期重試耗盡仍持續被限流 (429) 時拋出，用來觸發斷路器冷卻。"""
@@ -96,8 +136,10 @@ async def _fetch_page(session: aiohttp.ClientSession, page: int):
     paginated_url = f"{URL}&page={page}"
     for attempt in range(MAX_RETRIES + 1):
         try:
+            _stats["requests"] += 1
             async with session.get(paginated_url) as response:
                 if response.status == 429:
+                    _note_429(response)
                     if attempt >= MAX_RETRIES:
                         raise RateLimitedError(page)
                     # 被限流 -> 等待 (優先採用 Retry-After，否則指數退避) 後再重打
@@ -109,6 +151,8 @@ async def _fetch_page(session: aiohttp.ClientSession, page: int):
                     print(f"無法連線 (HTTP {response.status})")
                     return None
                 data = await response.json()
+                _stats["ok"] += 1
+                _stats["last_ok"] = time.time()
                 return data.get('products', [])
         except asyncio.TimeoutError:
             print(f"第 {page} 頁請求逾時")
@@ -149,7 +193,11 @@ async def fetch_products(session: aiohttp.ClientSession | None = None):
                 _consecutive_failures += 1
                 cooldown = min(COOLDOWN_BASE * (2 ** (_consecutive_failures - 1)), COOLDOWN_MAX)
                 _cooldown_until = time.monotonic() + cooldown
-                print(f"持續被限流 (連續 {_consecutive_failures} 次)，暫停請求 {cooldown:.0f} 秒後再試")
+                _stats["trips"] += 1
+                _stats["cooldown_total"] += cooldown
+                hdr = _stats.get("last_429_headers") or {}
+                print(f"持續被限流 (連續 {_consecutive_failures} 次)，暫停請求 {cooldown:.0f} 秒後再試"
+                      + (f"｜429 診斷: {hdr}" if hdr else ""))
                 return all_products
 
             if not products:  # None (連線失敗) 或空頁皆視為結束
