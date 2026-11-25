@@ -70,6 +70,31 @@ def rate_limit_stats():
     return s
 
 
+# 每幾輪在 log 印一次彙總統計 (讓人不用進 Discord、光看 log 就知道被擋多兇)
+SUMMARY_EVERY = 10
+_cycle_count = 0
+
+
+def _human_ago(ts):
+    if not ts:
+        return "從未"
+    d = time.time() - ts
+    if d < 60:
+        return f"{int(d)}秒前"
+    if d < 3600:
+        return f"{int(d / 60)}分前"
+    return f"{d / 3600:.1f}小時前"
+
+
+def rate_limit_summary():
+    """一行彙總,給 log 用。"""
+    s = _stats
+    total = s["requests"] or 1
+    return (f"[限流統計] 請求 {s['requests']} / 成功 {s['ok']} / 429 {s['http_429']} "
+            f"({s['http_429'] / total * 100:.0f}%)｜跳閘 {s['trips']} 次｜"
+            f"累計冷卻 {s['cooldown_total'] / 3600:.1f} 小時｜最近成功 {_human_ago(s['last_ok'])}")
+
+
 class RateLimitedError(Exception):
     """短期重試耗盡仍持續被限流 (429) 時拋出，用來觸發斷路器冷卻。"""
 
@@ -169,7 +194,11 @@ async def fetch_products(session: aiohttp.ClientSession | None = None):
     內建斷路器：若先前連續被限流而進入冷卻期，會直接跳過本輪請求回傳空清單，
     避免持續觸發限流。
     """
-    global _cooldown_until, _consecutive_failures
+    global _cooldown_until, _consecutive_failures, _cycle_count
+
+    _cycle_count += 1
+    if _cycle_count % SUMMARY_EVERY == 0:
+        print(rate_limit_summary())
 
     now = time.monotonic()
     if now < _cooldown_until:
